@@ -1,0 +1,19 @@
+{
+  "name": "vertex-ai-openai-proxy",
+  "version": "1.0.0",
+  "description": "A production-grade local proxy that translates OpenAI API calls to Google Vertex AI Gemini 3.1 Pro, with advanced state memory for Agentic tool calls.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "auth": "node auth.js"
+  },
+  "keywords": ["vertex-ai", "gemini", "openai-proxy", "llm-agent", "kilo-code", "cline"],
+  "author": "TechBedouin",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0"
+  }
+}

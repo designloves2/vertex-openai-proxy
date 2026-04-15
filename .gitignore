@@ -1,0 +1,41 @@
+# Environment variables (contains sensitive info)
+.env
+.env.local
+.env.production
+
+# Service account keys (NEVER commit these!)
+*.json
+!package.json
+!tsconfig.json
+
+# Node modules
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary files
+tmp/
+temp/
+
+# opensrc - source code for packages
+opensrc/
+
+# Local workspace specific
+scratch/
+app-animation/
+kilo-repo/
+.kilo/
+debug_logs/
+*.zip
+image.png
+nul
