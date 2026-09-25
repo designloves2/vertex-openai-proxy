@@ -1,9 +1,9 @@
 /**
  * Vertex AI Gemini Backend Server
- * 
+ *
  * This server connects to Google Vertex AI using OAuth authentication.
  * Uses the latest streamGenerateContent API endpoint.
- * 
+ *
  * Features:
  * - /chat - Simple text chat (legacy format)
  * - /v1/chat/completions - OpenAI-compatible API
@@ -17,12 +17,13 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const os = require('os');
+const { GoogleAuth } = require('google-auth-library');
 
 // ============================================================================
 // GLOBAL STATE
 // ============================================================================
 
-// REQUIRED for Gemini 3.1 Pro: We must store the thoughtSignature corresponding to 
+// REQUIRED for Gemini 3.1 Pro: We must store the thoughtSignature corresponding to
 // each function call to pass it back in the conversation history, avoiding 400 Errors.
 // ENHANCED: LRU memory eviction to prevent infinite memory leak. Max size 1000.
 class LRUCache {
@@ -45,6 +46,8 @@ class LRUCache {
     }
 }
 const toolCallData = new LRUCache(1000); // Stores { name: string, signature?: string }
+const toolSignatureByName = new Map(); // Fallback when the OpenAI client changes tool-call IDs
+let latestThoughtSignature = null;
 
 // --- HELPER: SMART LOGGING (PREVENTS EVENT LOOP FREEZES) ---
 function smartTruncate(obj, limit = 1000) {
@@ -90,21 +93,19 @@ const PORT = process.env.PORT || 3000;
 
 // HELPERS: Dynamic Model Routing
 function resolveVertexModel(requestedModel) {
-    const m = String(requestedModel || '').toLowerCase();
-    
-    // Pro Models
-    if (m.includes('pro') || m === 'gpt-4o' || m.includes('3.5')) {
-        // Use the env-configured PRO model if it contains "pro", otherwise fallback to a standard one
-        return MODEL_ID.includes('pro') ? MODEL_ID : 'gemini-1.5-pro-002';
-    }
-    
-    // Flash Models
-    if (m.includes('flash') || m.includes('mini') || m.includes('4o-mini')) {
-        // If the env model is flash-like, use it. Otherwise use the standard build.
-        return MODEL_ID.includes('flash') ? MODEL_ID : 'gemini-1.5-flash-002';
+    const requested = String(requestedModel || '').trim();
+
+    // The OpenAI-compatible client is allowed to select the actual Vertex model.
+    // Keep the .env model only as the fallback when no model was supplied.
+    if (requested) {
+        const aliases = {
+            'gpt-4o': 'gemini-3.1-pro',
+            'gpt-4o-mini': 'gemini-3.8-flash',
+            'Gemini 3.1 Pro (Vision)': 'gemini-3.1-pro'
+        };
+        return aliases[requested] || requested;
     }
 
-    // Default Fallback
     return MODEL_ID;
 }
 
@@ -142,97 +143,52 @@ function safeEnd(res, content) {
 }
 
 // ============================================================================
-// CREDENTIALS HELPER
+// CREDENTIALS / GOOGLE APPLICATION DEFAULT CREDENTIALS
 // ============================================================================
+
+const googleAuth = new GoogleAuth({
+    scopes: ['https://www.googleapis.com/auth/cloud-platform']
+});
 
 function getCredentialsPath() {
     const possiblePaths = [
+        process.env.GOOGLE_APPLICATION_CREDENTIALS,
+        path.join(process.env.APPDATA || '', 'gcloud', 'application_default_credentials.json'),
+        path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming', 'gcloud', 'application_default_credentials.json'),
         path.join(process.env.APPDATA || '', 'google-applications', 'application_default_credentials.json'),
-        path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming', 'google-applications', 'application_default_credentials.json'),
-    ];
+        path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming', 'google-applications', 'application_default_credentials.json')
+    ].filter(Boolean);
 
     for (const p of possiblePaths) {
-        if (p && fs.existsSync(p)) {
-            return p;
-        }
+        if (fs.existsSync(p)) return p;
     }
     return null;
 }
 
-// ============================================================================
-// GET ACCESS TOKEN FROM REFRESH TOKEN
-// ============================================================================
-
-function getAccessToken(forceRefresh = false) {
+async function getAccessToken(forceRefresh = false) {
     if (!forceRefresh && cachedAccessToken && Date.now() < cachedTokenExpiresAt) {
-        return Promise.resolve(cachedAccessToken);
+        return cachedAccessToken;
     }
-    return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            reject(new Error('getAccessToken timeout (60s)'));
-        }, 60000);
 
-        const credPath = getCredentialsPath();
-        if (!credPath) {
-            clearTimeout(timeout);
-            return reject(new Error('No credentials file found'));
+    try {
+        const client = await googleAuth.getClient();
+        const tokenResponse = await client.getAccessToken();
+        const accessToken = typeof tokenResponse === 'string'
+            ? tokenResponse
+            : tokenResponse?.token;
+
+        if (!accessToken) {
+            throw new Error('Google ADC did not return an access token');
         }
 
-        let creds;
-        try {
-            creds = JSON.parse(fs.readFileSync(credPath, 'utf8'));
-        } catch (e) {
-            clearTimeout(timeout);
-            return reject(new Error('Failed to read credentials file'));
-        }
-
-        const postData = new URLSearchParams({
-            client_id: creds.client_id,
-            client_secret: creds.client_secret,
-            refresh_token: creds.refresh_token,
-            grant_type: 'refresh_token'
-        }).toString();
-
-        const options = {
-            hostname: 'oauth2.googleapis.com',
-            port: 443,
-            path: '/token',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Content-Length': Buffer.byteLength(postData)
-            }
-        };
-
-        const req = https.request(options, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                clearTimeout(timeout);
-                try {
-                    const tokens = JSON.parse(data);
-                    if (tokens.error) {
-                        reject(new Error(tokens.error_description || tokens.error));
-                    } else {
-                        cachedAccessToken = tokens.access_token;
-                        // Cache for the expires_in duration (usually 3600s), minus a 5 minute buffer (300s)
-                        const expiresIn = tokens.expires_in || 3600;
-                        cachedTokenExpiresAt = Date.now() + ((expiresIn - 300) * 1000);
-                        resolve(tokens.access_token);
-                    }
-                } catch (e) {
-                    reject(new Error('Failed to parse OAuth response: ' + data));
-                }
-            });
-        });
-
-        req.on('error', (e) => {
-            clearTimeout(timeout);
-            reject(e);
-        });
-        req.write(postData);
-        req.end();
-    });
+        cachedAccessToken = accessToken;
+        cachedTokenExpiresAt = Date.now() + (50 * 60 * 1000);
+        return accessToken;
+    } catch (error) {
+        cachedAccessToken = null;
+        cachedTokenExpiresAt = 0;
+        throw new Error(`Google ADC authentication failed: ${error.message}`);
+    }
 }
 
 // ============================================================================
@@ -508,7 +464,7 @@ app.post('/chat', async (req, res) => {
         if (error.message.includes('credentials')) {
             return res.status(500).json({
                 error: 'Authentication failed',
-                message: 'Please re-run: node auth.js'
+                message: 'Please run: gcloud auth application-default login'
             });
         }
 
@@ -716,11 +672,18 @@ async function openAiMessagesToGeminiContents(messages) {
                     const funcArgs = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments || '{}') : tc.function.arguments;
                     // RESTORE: Look up the signature from our internal toolCallData Map
                     const stored = toolCallData.get(tc.id) || {};
+                    const fallbackSignature =
+                        stored.signature ||
+                        toolSignatureByName.get(funcName) ||
+                        null;
+
                     const callPart = { functionCall: { name: funcName, args: funcArgs } };
-                    
-                    // MUST be snake_case for Vertex AI "Thinking" signatures
-                    if (stored.signature) {
-                        callPart.thought_signature = stored.signature;
+
+                    // Gemini 3 requires the signature on the original functionCall part.
+                    if (fallbackSignature) {
+                        callPart.thought_signature = fallbackSignature;
+                    } else {
+                        console.warn(`[V1/CHAT] Missing thought signature for tool call: ${funcName} (${tc.id})`);
                     }
 
                     parts.push(callPart);
@@ -754,7 +717,7 @@ async function openAiMessagesToGeminiContents(messages) {
             });
             // Ensure thoughtSignature is passed back if it exists for this turn sequence
             if (stored.signature) {
-                // Gemini API expects the response to correspond to a turn. 
+                // Gemini API expects the response to correspond to a turn.
                 // We keep the signature in memory to help the next tool-leg if needed.
             }
         }
@@ -805,6 +768,16 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
 
         const { contents, systemInstructionText, imageLoadError, inlinedImagesInPayload } = await openAiMessagesToGeminiContents(messages);
+        if (stream && contents.some(c => c.role === 'model' && c.parts?.some(p => p.functionCall))) {
+            console.log('[V1/CHAT] Model tool-call signatures:', contents
+                .filter(c => c.role === 'model')
+                .flatMap(c => c.parts || [])
+                .filter(p => p.functionCall)
+                .map(p => ({
+                    name: p.functionCall.name,
+                    hasThoughtSignature: !!p.thought_signature
+                })));
+        }
         if (imageLoadError) {
             return res.status(400).json({
                 error: {
@@ -818,13 +791,19 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         // FIX: Utilize actual max_tokens from request
         const generationConfig = {
-            temperature: temperature,
-            topP: 1,
-            topK: 40,
             maxOutputTokens: max_tokens || 32768
         };
 
-        if (!inlinedImagesInPayload) {
+        const isGemini3Flash = /^gemini-3\.\d+-flash$/i.test(MODEL_ID_TO_USE);
+        if (!isGemini3Flash) {
+            generationConfig.temperature = temperature;
+            generationConfig.topP = 1;
+            generationConfig.topK = 40;
+        }
+
+        if (!inlinedImagesInPayload && isGemini3Flash) {
+            generationConfig.thinkingConfig = { thinkingLevel: "high" };
+        } else if (!inlinedImagesInPayload) {
             generationConfig.thinkingConfig = { thinkingLevel: "high" };
         } else {
             console.log(`[V1/CHAT] Images in request: omitting thinkingConfig ...`);
@@ -879,9 +858,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             const accessToken = await getAccessToken();
             const apiEndpoint = 'aiplatform.googleapis.com';
             const apiPath = `/v1/projects/${PROJECT_ID}/locations/${LOCATION_TO_USE}/publishers/google/models/${MODEL_ID_TO_USE}:streamGenerateContent?alt=sse`;
-
-            const requestBody = baseRequestBody;
-            const postData = JSON.stringify(requestBody);
+            const postData = JSON.stringify(baseRequestBody);
 
             const options = {
                 hostname: apiEndpoint,
@@ -893,142 +870,220 @@ app.post('/v1/chat/completions', async (req, res) => {
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(postData)
                 },
-                timeout: 60000
+                timeout: 90000
             };
 
             const proxyReq = https.request(options, (proxyRes) => {
                 if (proxyRes.statusCode !== 200) {
-                    res.status(proxyRes.statusCode);
-                    proxyRes.pipe(res);
+                    let errBody = '';
+                    proxyRes.setEncoding('utf8');
+                    proxyRes.on('data', chunk => errBody += chunk);
+                    proxyRes.on('end', () => {
+                        console.error('[V1/STREAM] Gemini HTTP error:', proxyRes.statusCode, errBody.substring(0, 2000));
+                        if (!res.headersSent) {
+                            res.status(proxyRes.statusCode).json({
+                                error: {
+                                    message: errBody || `Gemini API returned HTTP ${proxyRes.statusCode}`,
+                                    type: 'api_error',
+                                    code: proxyRes.statusCode
+                                }
+                            });
+                        } else {
+                            safeEnd(res, `data: ${JSON.stringify({
+                                error: { message: errBody || `Gemini API returned HTTP ${proxyRes.statusCode}` }
+                            })}\n\n`);
+                        }
+                    });
                     return;
                 }
 
                 res.writeHead(200, {
-                    'Content-Type': 'text/event-stream',
-                    'Cache-Control': 'no-cache',
+                    'Content-Type': 'text/event-stream; charset=utf-8',
+                    'Cache-Control': 'no-cache, no-transform',
                     'Connection': 'keep-alive',
                     'Access-Control-Allow-Origin': '*',
                     'X-Accel-Buffering': 'no'
                 });
-                res.flushHeaders();
+                if (res.flushHeaders) res.flushHeaders();
 
                 let dataBuffer = '';
+                let hasStreamedToolCall = false;
+                let sawAnyCandidate = false;
+                let sawAnyText = false;
+
                 proxyRes.setEncoding('utf8');
 
-                let hasStreamedToolCall = false; // Tracks if we need to send 'tool_calls' as the stop reason
+                const emitText = (textChunk) => {
+                    if (!textChunk) return;
+                    sawAnyText = true;
+                    const chunkObj = {
+                        id: `chatcmpl-${Date.now()}`,
+                        object: 'chat.completion.chunk',
+                        created: Math.floor(Date.now() / 1000),
+                        model: requestedModel || MODEL_ID_TO_USE,
+                        choices: [{
+                            delta: { role: 'assistant', content: textChunk },
+                            index: 0,
+                            finish_reason: null
+                        }]
+                    };
+                    safeWrite(res, `data: ${JSON.stringify(chunkObj)}\n\n`);
+                };
+
+                const emitToolCall = (functionCall, thoughtSignature = null) => {
+                    if (!functionCall?.name) return;
+                    hasStreamedToolCall = true;
+                    const callId = 'call_' + Math.random().toString(36).slice(2, 11);
+                    const args = typeof functionCall.args === 'string'
+                        ? functionCall.args
+                        : JSON.stringify(functionCall.args || {});
+
+                    const signature = thoughtSignature || functionCall.thoughtSignature || functionCall.thought_signature || null;
+
+                    toolCallData.set(callId, {
+                        name: functionCall.name,
+                        signature
+                    });
+
+                    // Gemini 3 parallel/sequential function calling may expose the
+                    // signature only on the first function-call part. Keep a fallback
+                    // by function name in case the OpenAI client changes the call ID.
+                    if (signature) {
+                        latestThoughtSignature = signature;
+                        toolSignatureByName.set(functionCall.name, signature);
+                        console.log(`[V1/STREAM] Tool signature captured: ${functionCall.name}`);
+                    }
+
+                    const chunkObj = {
+                        id: `chatcmpl-${Date.now()}`,
+                        object: 'chat.completion.chunk',
+                        created: Math.floor(Date.now() / 1000),
+                        model: requestedModel || MODEL_ID_TO_USE,
+                        choices: [{
+                            delta: {
+                                role: 'assistant',
+                                tool_calls: [{
+                                    index: 0,
+                                    id: callId,
+                                    type: 'function',
+                                    function: {
+                                        name: functionCall.name,
+                                        arguments: args
+                                    }
+                                }]
+                            },
+                            index: 0,
+                            finish_reason: null
+                        }]
+                    };
+                    safeWrite(res, `data: ${JSON.stringify(chunkObj)}\n\n`);
+                };
+
+                // Vertex AI alt=sse can deliver multiple JSON objects as consecutive
+                // data lines without a blank-line separator. Parse each complete data line
+                // independently, while buffering a partial line across network chunks.
+                const processDataLine = (line) => {
+                    const trimmed = String(line).trim();
+                    if (!trimmed.startsWith('data:')) return;
+
+                    const jsonStr = trimmed.startsWith('data: ')
+                        ? trimmed.slice(6).trim()
+                        : trimmed.slice(5).trim();
+
+                    if (!jsonStr || jsonStr === '[DONE]') return;
+
+                    let parsed;
+                    try {
+                        parsed = JSON.parse(jsonStr);
+                    } catch (e) {
+                        console.warn(
+                            '[V1/STREAM] Could not parse SSE data line:',
+                            jsonStr.substring(0, 300)
+                        );
+                        return;
+                    }
+
+                    if (parsed.error) {
+                        console.error('[V1/STREAM] Gemini stream error:', parsed.error);
+                        return;
+                    }
+
+                    const candidates = parsed.candidates || [];
+                    if (candidates.length) sawAnyCandidate = true;
+
+                    for (const candidate of candidates) {
+                        const parts = candidate?.content?.parts || [];
+
+                        for (const part of parts) {
+                            if (part.thought) continue;
+
+                            if (part.text) {
+                                emitText(part.text);
+                            }
+
+                            if (part.functionCall) {
+                                const thoughtSignature =
+                                    part.thought_signature ||
+                                    part.thoughtSignature ||
+                                    latestThoughtSignature ||
+                                    null;
+                                emitToolCall(part.functionCall, thoughtSignature);
+                            }
+                        }
+                    }
+                };
+
+                let sseLineBuffer = '';
 
                 proxyRes.on('data', (chunk) => {
-                    dataBuffer += chunk;
+                    sseLineBuffer += chunk;
 
-                    // SSE complete events are separated by '\n\n'
-                    while (dataBuffer.includes('\n\n')) {
-                        const eventEndIndex = dataBuffer.indexOf('\n\n');
-                        const rawEvent = dataBuffer.substring(0, eventEndIndex);
-                        dataBuffer = dataBuffer.substring(eventEndIndex + 2);
+                    // Normalize CRLF/CR to LF.
+                    sseLineBuffer = sseLineBuffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-                        // Parse individual lines within the event
-                        const lines = rawEvent.split('\n');
-                        let jsonStr = '';
-
-                        for (const line of lines) {
-                            if (line.startsWith('data: ')) {
-                                jsonStr += line.substring(6);
-                            } else if (line.startsWith('data:')) {
-                                jsonStr += line.substring(5);
-                            }
-                        }
-
-                        if (!jsonStr || jsonStr.trim() === '[DONE]') continue;
-
-                        try {
-                            const parsed = JSON.parse(jsonStr);
-                            if (parsed.candidates && parsed.candidates.length > 0) {
-                                const parts = parsed.candidates[0]?.content?.parts || [];
-                                parts.forEach(part => {
-                                    // Skip thought parts (internal reasoning)
-                                    if (part.thought) {
-                                        console.log('[V1/STREAM] Thought:', part.text?.substring(0, 100) + '...');
-                                        return;
-                                    }
-                                    if (part.text) {
-                                        const chunkObj = {
-                                            id: `chatcmpl-${Date.now()}`,
-                                            object: 'chat.completion.chunk',
-                                            created: Math.floor(Date.now() / 1000),
-                                            model: requestedModel || MODEL_ID_TO_USE,
-                                            choices: [{
-                                                delta: { content: part.text, role: 'assistant' },
-                                                index: 0,
-                                                finish_reason: null
-                                            }]
-                                        };
-                                        safeWrite(res, `data: ${JSON.stringify(chunkObj)}\n\n`);
-                                    }
-
-                                    if (part.functionCall) {
-                                        hasStreamedToolCall = true;
-                                        const callId = 'call_' + Math.random().toString(36).substr(2, 9);
-
-                                        // FIX: Use correct cache mechanism
-                                        toolCallData.set(callId, {
-                                            name: part.functionCall.name,
-                                            signature: part.thoughtSignature || null
-                                        });
-
-                                        const chunkObj = {
-                                            id: `chatcmpl-${Date.now()}`,
-                                            object: 'chat.completion.chunk',
-                                            created: Math.floor(Date.now() / 1000),
-                                            model: model || MODEL_ID,
-                                            choices: [{
-                                                delta: {
-                                                    role: 'assistant',
-                                                    tool_calls: [{
-                                                        index: 0,
-                                                        id: callId,
-                                                        type: 'function',
-                                                        function: {
-                                                            name: part.functionCall.name,
-                                                            arguments: typeof part.functionCall.args === 'string' ? part.functionCall.args : JSON.stringify(part.functionCall.args || {})
-                                                        }
-                                                    }]
-                                                },
-                                                index: 0,
-                                                // FIX: Prevent infinite loop by setting finish reason to null during stream
-                                                finish_reason: null
-                                            }]
-                                        };
-                                        safeWrite(res, `data: ${JSON.stringify(chunkObj)}\n\n`);
-                                    }
-                                });
-                            }
-                        } catch (e) {
-                            // If it fails to parse but event was separated by \n\n, try to recover.
-                        }
+                    let newlineIndex;
+                    while ((newlineIndex = sseLineBuffer.indexOf('\n')) !== -1) {
+                        const line = sseLineBuffer.slice(0, newlineIndex);
+                        sseLineBuffer = sseLineBuffer.slice(newlineIndex + 1);
+                        processDataLine(line);
                     }
                 });
 
                 proxyRes.on('end', () => {
-                    // FIX: Final empty packet with correct stop sequence for coding IDEs
+                    if (dataBuffer.trim()) processEvent(dataBuffer);
+
+                    console.log(`[V1/STREAM] Completed. Candidate=${sawAnyCandidate}, Text=${sawAnyText}, ToolCall=${hasStreamedToolCall}`);
+
                     const finishChunkObj = {
                         id: `chatcmpl-${Date.now()}`,
                         object: 'chat.completion.chunk',
                         created: Math.floor(Date.now() / 1000),
-                        model: model || MODEL_ID,
+                        model: requestedModel || MODEL_ID_TO_USE,
                         choices: [{
                             delta: {},
                             index: 0,
                             finish_reason: hasStreamedToolCall ? 'tool_calls' : 'stop'
                         }]
                     };
+
                     safeWrite(res, `data: ${JSON.stringify(finishChunkObj)}\n\n`);
                     safeWrite(res, 'data: [DONE]\n\n');
                     safeEnd(res);
                 });
+
+                proxyRes.on('error', (err) => {
+                    console.error('[V1/STREAM] Response error:', err.message);
+                    safeEnd(res);
+                });
+            });
+
+            proxyReq.setTimeout(90000, () => {
+                console.error('[V1/STREAM] Vertex request timed out after 90s');
+                proxyReq.destroy(new Error('Vertex request timed out after 90 seconds'));
             });
 
             proxyReq.on('error', (err) => {
-                console.error('[V1/STREAM] Error:', err.message);
+                console.error('[V1/STREAM] Request error:', err.message);
                 safeEnd(res);
             });
 
@@ -1111,7 +1166,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                         // FIX: use correct cache mechanism
                         toolCallData.set(callId, {
                             name: callPart.functionCall.name,
-                            signature: callPart.thoughtSignature || null
+                            signature: callPart.thought_signature || callPart.thoughtSignature || null
                         });
 
                         toolCalls = [{
@@ -1174,7 +1229,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (error.message.includes('credentials')) {
             return res.status(500).json({
                 error: {
-                    message: 'Authentication failed. Please re-run: node auth.js',
+                    message: 'Authentication failed. Please run: gcloud auth application-default login',
                     type: 'authentication_error'
                 }
             });
@@ -1300,13 +1355,13 @@ app.post('/v1/responses', async (req, res) => {
             };
 
             // Handshake (ECHO REQUESTED MODEL)
-            sendEvent('response.created', { 
-                type: 'response.created', 
-                response: { 
-                    id: respId, 
+            sendEvent('response.created', {
+                type: 'response.created',
+                response: {
+                    id: respId,
                     created_at: Math.floor(Date.now() / 1000),
                     model: requestedModel || 'kilo-code-gemini'
-                } 
+                }
             });
 
             let proxyReq = null;
@@ -1316,7 +1371,7 @@ app.post('/v1/responses', async (req, res) => {
                 try {
                     const accessToken = await getAccessToken();
                     const { contents, systemInstructionText, imageLoadError, inlinedImagesInPayload } = await openAiMessagesToGeminiContents(finalMessages);
-                    
+
                     if (imageLoadError) {
                         sendEvent('error', { type: 'error', code: 'image_error', message: imageLoadError, sequence_number: 0 });
                         return safeEnd(res);
@@ -1329,8 +1384,8 @@ app.post('/v1/responses', async (req, res) => {
 
                     const body = {
                         contents,
-                        generationConfig: { 
-                            temperature: temperature || 0.7, 
+                        generationConfig: {
+                            temperature: temperature || 0.7,
                             maxOutputTokens: max_output_tokens || 32768,
                             thinkingConfig: (inlinedImagesInPayload ? undefined : { thinkingLevel: "high" })
                         },
@@ -1349,7 +1404,7 @@ app.post('/v1/responses', async (req, res) => {
 
                     if (systemInstructionText) body.systemInstruction = { role: 'system', parts: [{ text: systemInstructionText }] };
 
-                    const EFFECTIVE_LOCATION = LOCATION_TO_USE === 'global' ? 'us-central1' : LOCATION_TO_USE;
+                    const EFFECTIVE_LOCATION = LOCATION_TO_USE;
                     const apiPath = `/v1/projects/${PROJECT_ID}/locations/${EFFECTIVE_LOCATION}/publishers/google/models/${MODEL_ID_TO_USE}:streamGenerateContent?alt=sse`;
                     const postData = JSON.stringify(body);
 
@@ -1390,7 +1445,7 @@ app.post('/v1/responses', async (req, res) => {
                                         const parts = parsed.candidates?.[0]?.content?.parts || [];
                                         parts.forEach(p => {
                                             if (p.thought) return;
-                                            
+
                                             // Capture thinking signatures (support both snake_case from API and camelCase just in case)
                                             const sig = p.thought_signature || p.thoughtSignature || null;
                                             if (p.text) {
@@ -1407,9 +1462,9 @@ app.post('/v1/responses', async (req, res) => {
                                                 const callId = generateId('call_');
                                                 const args = typeof p.functionCall.args === 'string' ? p.functionCall.args : JSON.stringify(p.functionCall.args || {});
                                                 const currentIndex = outputIndexCounter++;
-                                                
+
                                                 toolCallData.set(callId, { name: p.functionCall.name, signature: sig });
-                                                
+
                                                 sendEvent('response.output_item.added', { type: 'response.output_item.added', output_index: currentIndex, item: { id: callId, type: 'function_call', call_id: callId, name: p.functionCall.name, arguments: '' } });
                                                 sendEvent('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', item_id: callId, output_index: currentIndex, delta: args });
                                                 sendEvent('response.output_item.done', { type: 'response.output_item.done', output_index: currentIndex, item: { id: callId, type: 'function_call', call_id: callId, name: p.functionCall.name, arguments: args, status: 'completed' } });
@@ -1449,14 +1504,14 @@ app.post('/v1/responses', async (req, res) => {
             const accessToken = await getAccessToken();
             const { contents, systemInstructionText, imageLoadError, inlinedImagesInPayload } = await openAiMessagesToGeminiContents(finalMessages);
             if (imageLoadError) return res.status(400).json({ error: imageLoadError });
-            const body = { 
-                contents, 
-                generationConfig: { 
-                    temperature: temperature || 0.7, 
+            const body = {
+                contents,
+                generationConfig: {
+                    temperature: temperature || 0.7,
                     maxOutputTokens: max_output_tokens || 32768,
                     thinkingConfig: (inlinedImagesInPayload ? undefined : { thinkingLevel: "high" })
-                }, 
-                safetySettings: SAFETY_SETTINGS 
+                },
+                safetySettings: SAFETY_SETTINGS
             };
             if (systemInstructionText) body.systemInstruction = { role: 'system', parts: [{ text: systemInstructionText }] };
 
@@ -1470,7 +1525,7 @@ app.post('/v1/responses', async (req, res) => {
                 }];
             }
             const rawResponseObj = await callGeminiAPIWithRetry(baseRequestBody, false, MODEL_ID_TO_USE, LOCATION_TO_USE);
-            
+
             if (rawResponseObj.statusCode !== 200) {
                  return res.status(rawResponseObj.statusCode).json({
                     error: {
@@ -1500,22 +1555,22 @@ app.post('/v1/responses', async (req, res) => {
                         });
 
                         outputItems.push({
-                            id: generateId('fc_'), 
-                            type: 'function_call', 
-                            call_id: callId, 
-                            name: p.functionCall.name, 
-                            arguments: funcArgs, 
-                            status: 'completed' 
+                            id: generateId('fc_'),
+                            type: 'function_call',
+                            call_id: callId,
+                            name: p.functionCall.name,
+                            arguments: funcArgs,
+                            status: 'completed'
                         });
                     }
                 });
             });
             if (reply) outputItems.unshift({ id: msgId, type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: reply }] });
-            res.json({ 
-                id: respId, 
+            res.json({
+                id: respId,
                 model: requestedModel || 'kilo-code-gemini',
-                output: outputItems, 
-                usage: { input_tokens: 0, output_tokens: 0 } 
+                output: outputItems,
+                usage: { input_tokens: 0, output_tokens: 0 }
             });
         }
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -1527,13 +1582,14 @@ app.post('/v1/responses', async (req, res) => {
 
 app.get('/v1/models', (req, res) => {
     const list = [
+        { id: MODEL_ID, vision: true, reasoning: /gemini-3/i.test(MODEL_ID) },
         { id: "gpt-4o", vision: true, reasoning: true },
         { id: "gpt-4o-mini", vision: true, reasoning: false },
         { id: "Gemini 3.1 Pro (Vision)", vision: true, reasoning: true },
-        { id: "Gemini 3 Flash", vision: true, reasoning: false },
+        { id: "gemini-3.8-flash", vision: true, reasoning: true },
         { id: "gemini-1.5-pro-002", vision: true, reasoning: true },
         { id: "gemini-1.5-flash-002", vision: true, reasoning: false }
-    ];
+    ].filter((m, i, arr) => arr.findIndex(x => x.id === m.id) === i);
 
     res.json({
         object: "list",
@@ -1618,12 +1674,12 @@ app.listen(PORT, () => {
 
     const credPath = getCredentialsPath();
     if (credPath) {
-        console.log(`    Credentials: ${credPath}`);
-        console.log('  ✅ Authentication configured!');
+        console.log(`    ADC Credentials: ${credPath}`);
+        console.log('  [OK] Google Application Default Credentials configured!');
     } else {
-        console.log('  ⚠️  No credentials found. Run: node auth.js');
+        console.log('  [WARN] No Google ADC file detected. Run: gcloud auth application-default login');
     }
-    console.log('  💡 TIP: If using node --watch, logs are in ./debug_logs/ to prevent reboot loops.');
+    console.log('  ?뮕 TIP: If using node --watch, logs are in ./debug_logs/ to prevent reboot loops.');
     console.log('');
 });
 
