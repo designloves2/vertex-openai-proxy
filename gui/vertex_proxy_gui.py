@@ -18,11 +18,46 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 import urllib.request
 from tkinter import messagebox
 
-import customtkinter as ctk
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+CRASH_LOG_PATH = os.path.join(PROJECT_ROOT, "gui", "crash.log")
+
+
+def log_crash(exc_type, exc_value, exc_tb):
+    """pythonw.exe has no console, so an unhandled exception normally just
+    kills the process with zero visible output. Write it to a file instead,
+    and also install this as sys.excepthook / Tk's callback-exception hook so
+    errors from GUI callbacks (button clicks, etc.) get captured too."""
+    try:
+        with open(CRASH_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 70 + "\n")
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+            traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+    except Exception:
+        pass
+
+
+sys.excepthook = log_crash
+
+try:
+    import customtkinter as ctk
+except Exception:
+    log_crash(*sys.exc_info())
+    _root = tk.Tk()
+    _root.withdraw()
+    messagebox.showerror(
+        "Vertex OpenAI Proxy",
+        "customtkinter를 불러오지 못해 GUI를 시작할 수 없습니다.\n\n"
+        "PowerShell에서 다음을 실행해 설치해주세요:\n"
+        "  python -m pip install -r gui\\requirements.txt\n\n"
+        f"자세한 오류는 {CRASH_LOG_PATH} 파일을 확인하세요.",
+    )
+    _root.destroy()
+    sys.exit(1)
 
 try:
     import pystray
@@ -42,7 +77,6 @@ WHITE = "#FFFFFF"
 MUTED = "#5A4E42"
 FONT_NAME = "Segoe UI" if sys.platform == "win32" else "Helvetica"
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 
 FALLBACK_MODELS = [
@@ -169,6 +203,7 @@ class ProxyGuiApp:
         ctk.set_default_color_theme("dark-blue")
 
         self.root = ctk.CTk()
+        self.root.report_callback_exception = log_crash
         self.root.title("Vertex OpenAI Proxy")
         try:
             self.root.configure(fg_color=BEIGE)
@@ -580,4 +615,18 @@ if __name__ == "__main__":
             sys.exit(1)
 
     write_lock_pid()
-    ProxyGuiApp(lock_socket=lock_socket).run()
+    try:
+        ProxyGuiApp(lock_socket=lock_socket).run()
+    except Exception:
+        log_crash(*sys.exc_info())
+        try:
+            _root3 = tk.Tk()
+            _root3.withdraw()
+            messagebox.showerror(
+                "Vertex OpenAI Proxy",
+                f"GUI 실행 중 오류가 발생했습니다.\n자세한 내용은 {CRASH_LOG_PATH} 파일을 확인하세요.",
+            )
+            _root3.destroy()
+        except Exception:
+            pass
+        raise

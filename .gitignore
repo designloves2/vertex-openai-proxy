@@ -15,6 +15,7 @@ node_modules/
 __pycache__/
 *.pyc
 .gui-instance.lock
+gui/crash.log
 
 # OS files
 .DS_Store
