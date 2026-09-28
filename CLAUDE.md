@@ -1,5 +1,20 @@
 # Vertex OpenAI Proxy — GUI debugging history
 
+## Status: GUI is functional. Core flow verified end-to-end; tray/mutex need one manual click-through
+
+Everything below the "Status (previous)" heading is resolved and kept only
+as history/context for future changes. Remaining open items:
+- Tray icon's own context menu (Open / Restart Server / Restart GUI / Quit)
+  and the duplicate-instance-launch prompt haven't been re-verified after
+  the Node-PATH fix — they need real mouse clicks / a second real launch,
+  which wasn't safe to automate against the user's live desktop. Ask the
+  user to click through these once if it matters.
+- Separately, unrelated to the GUI: `index.js` had a literally-corrupted
+  byte sequence in a console.log string (`'  ?뮕 TIP: ...'` — garbled bytes
+  baked into the file itself, not a runtime encoding issue), replaced with
+  plain ASCII (`[TIP]`). Checked the rest of `index.js` for other non-UTF-8
+  byte sequences; none found.
+
 ## Status: launch fixed and verified; Start/Stop/Restart now verified working end-to-end
 
 The BOM/encoding fix below made the GUI launch. A second, separate bug was

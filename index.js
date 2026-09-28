@@ -1679,7 +1679,7 @@ app.listen(PORT, () => {
     } else {
         console.log('  [WARN] No Google ADC file detected. Run: gcloud auth application-default login');
     }
-    console.log('  ?뮕 TIP: If using node --watch, logs are in ./debug_logs/ to prevent reboot loops.');
+    console.log('  [TIP] If using node --watch, logs are in ./debug_logs/ to prevent reboot loops.');
     console.log('');
 });
 
