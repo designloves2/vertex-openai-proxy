@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>Vertex OpenAI Proxy</title>
+<style>
+  :root {
+    --beige: #f1e3d3;
+    --black: #1a1a1a;
+    --black-hover: #333333;
+    --white: #ffffff;
+    --muted: #5a4e42;
+    --green: #3b8f5c;
+    --red: #b23b3b;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--beige);
+    color: var(--black);
+    font-family: "Segoe UI", -apple-system, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  body { padding: 22px 24px; }
+
+  h1 {
+    font-size: 21px;
+    margin: 0 0 10px 0;
+    font-weight: 700;
+  }
+
+  .status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); box-shadow: 0 0 6px rgba(178,59,59,.6); }
+  .dot.running { background: var(--green); box-shadow: 0 0 6px rgba(59,143,92,.6); }
+  #statusText { font-weight: 700; font-size: 13px; }
+
+  .field-row { display: flex; align-items: center; margin-bottom: 10px; gap: 8px; }
+  .field-row label { width: 190px; font-weight: 700; font-size: 12px; flex-shrink: 0; }
+
+  input[type="text"], select {
+    background: var(--black);
+    color: var(--white);
+    border: none;
+    border-radius: 14px;
+    padding: 9px 14px;
+    font-size: 13px;
+    outline: none;
+    flex: 1;
+    box-shadow: 0 2px 6px rgba(0,0,0,.18);
+    transition: box-shadow .15s ease;
+  }
+  input[type="text"]:focus, select:focus { box-shadow: 0 0 0 2px var(--muted); }
+
+  select { -webkit-appearance: none; appearance: none; cursor: pointer; }
+
+  .icon-btn {
+    width: 36px; height: 36px; border-radius: 12px;
+    background: var(--black); color: var(--white);
+    border: none; cursor: pointer; font-size: 14px;
+    box-shadow: 0 2px 6px rgba(0,0,0,.18);
+  }
+  .icon-btn:hover { background: var(--black-hover); }
+
+  .btn-row { display: flex; gap: 10px; margin: 16px 0 12px 0; flex-wrap: wrap; }
+  button.action {
+    background: var(--black); color: var(--white);
+    border: none; border-radius: 14px;
+    padding: 10px 18px; font-size: 13px; font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 3px 8px rgba(0,0,0,.22);
+    transition: background .15s ease, transform .05s ease;
+  }
+  button.action:hover { background: var(--black-hover); }
+  button.action:active { transform: translateY(1px); }
+  button.action:disabled { background: #9a9a9a; cursor: default; box-shadow: none; }
+
+  .hint { font-size: 11px; color: var(--muted); margin-bottom: 12px; }
+
+  .log-header {
+    display: flex; align-items: center; gap: 6px;
+    cursor: pointer; font-weight: 700; font-size: 12px;
+    margin-bottom: 6px; user-select: none;
+  }
+
+  #logPanel {
+    background: var(--black);
+    border-radius: 16px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.25);
+    height: 230px;
+    overflow: hidden;
+    transition: height .18s ease, opacity .18s ease;
+  }
+  #logPanel.collapsed { height: 0; box-shadow: none; }
+
+  #logText {
+    color: var(--white);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11.5px;
+    line-height: 1.45;
+    padding: 12px 14px;
+    height: 100%;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+</style>
+</head>
+<body>
+  <h1>Vertex OpenAI Proxy</h1>
+  <div class="status-row">
+    <div id="statusDot" class="dot"></div>
+    <div id="statusText">중지됨</div>
+  </div>
+
+  <div class="field-row">
+    <label>Google Cloud Project ID</label>
+    <input type="text" id="projectId" />
+    <button class="icon-btn" id="toggleMask" title="보기/가리기">👁</button>
+  </div>
+  <div class="field-row">
+    <label>리전 (Location)</label>
+    <input type="text" id="location" />
+  </div>
+  <div class="field-row">
+    <label>Gemini 모델</label>
+    <select id="model"></select>
+  </div>
+  <div class="field-row">
+    <label>포트 (Port)</label>
+    <input type="text" id="port" />
+  </div>
+
+  <div class="btn-row">
+    <button class="action" id="btnStart">시작</button>
+    <button class="action" id="btnStop">정지</button>
+    <button class="action" id="btnRestart">재시작</button>
+    <button class="action" id="btnSave">저장 후 재시작</button>
+  </div>
+
+  <div class="hint">창을 닫으면 트레이로 최소화됩니다. 완전히 종료하려면 트레이 아이콘 메뉴를 사용하세요.</div>
+
+  <div class="log-header" id="logToggle">▼ &nbsp;로그</div>
+  <div id="logPanel"><div id="logText"></div></div>
+
+<script>
+  const FALLBACK_MODELS = [
+    "gemini-3.7-flash",
+    "gemini-3.1-pro",
+    "gemini-3.8-flash",
+    "gemini-1.5-pro-002",
+    "gemini-1.5-flash-002",
+  ];
+
+  let projectMasked = true;
+  let logVisible = true;
+
+  function $(id) { return document.getElementById(id); }
+
+  function api() { return window.pywebview.api; }
+
+  function fillModelOptions(values, selected) {
+    const sel = $("model");
+    sel.innerHTML = "";
+    for (const v of values) {
+      const opt = document.createElement("option");
+      opt.value = v; opt.textContent = v;
+      if (v === selected) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    if (selected && !values.includes(selected)) {
+      const opt = document.createElement("option");
+      opt.value = selected; opt.textContent = selected; opt.selected = true;
+      sel.prepend(opt);
+    }
+  }
+
+  async function loadEnv() {
+    const env = await api().get_env();
+    $("projectId").value = env.GOOGLE_CLOUD_PROJECT_ID || "";
+    $("location").value = env.GOOGLE_CLOUD_LOCATION || "global";
+    $("port").value = env.PORT || "3000";
+    fillModelOptions(FALLBACK_MODELS, env.GOOGLE_CLOUD_MODEL_ID || "gemini-3.7-flash");
+
+    api().models(env.PORT || "3000").then((live) => {
+      const merged = Array.from(new Set([...(live || []), ...FALLBACK_MODELS]));
+      fillModelOptions(merged, env.GOOGLE_CLOUD_MODEL_ID);
+    });
+  }
+
+  function currentFields() {
+    return {
+      GOOGLE_CLOUD_PROJECT_ID: $("projectId").value.trim(),
+      GOOGLE_CLOUD_LOCATION: $("location").value.trim() || "global",
+      GOOGLE_CLOUD_MODEL_ID: $("model").value.trim() || "gemini-3.7-flash",
+      PORT: $("port").value.trim() || "3000",
+    };
+  }
+
+  function setStatus(running) {
+    $("statusDot").classList.toggle("running", !!running);
+    $("statusText").textContent = running ? "실행 중" : "중지됨";
+  }
+
+  function appendLog(line) {
+    const el = $("logText");
+    el.textContent += line;
+    el.parentElement.scrollTop = el.parentElement.scrollHeight;
+  }
+
+  function setButtonsBusy(busy) {
+    for (const id of ["btnStart", "btnStop", "btnRestart", "btnSave"]) {
+      $(id).disabled = busy;
+    }
+  }
+
+  $("toggleMask").addEventListener("click", () => {
+    projectMasked = !projectMasked;
+    $("projectId").type = projectMasked ? "password" : "text";
+    $("toggleMask").textContent = projectMasked ? "👁" : "🙈";
+  });
+
+  $("logToggle").addEventListener("click", () => {
+    logVisible = !logVisible;
+    $("logPanel").classList.toggle("collapsed", !logVisible);
+    $("logToggle").textContent = (logVisible ? "▼" : "▶") + "  로그";
+  });
+
+  $("btnStart").addEventListener("click", async () => {
+    setButtonsBusy(true);
+    const res = await api().start(currentFields());
+    if (!res.ok) alert(res.error || "시작 실패");
+    setButtonsBusy(false);
+  });
+  $("btnStop").addEventListener("click", async () => {
+    setButtonsBusy(true);
+    await api().stop();
+    setButtonsBusy(false);
+  });
+  $("btnRestart").addEventListener("click", async () => {
+    setButtonsBusy(true);
+    const res = await api().restart(currentFields());
+    if (!res.ok) alert(res.error || "재시작 실패");
+    setButtonsBusy(false);
+  });
+  $("btnSave").addEventListener("click", async () => {
+    setButtonsBusy(true);
+    const res = await api().save_and_restart(currentFields());
+    if (!res.ok) alert(res.error || "저장/재시작 실패");
+    setButtonsBusy(false);
+  });
+
+  window.addEventListener("pywebviewready", () => {
+    $("projectId").type = "password";
+    loadEnv();
+    api().status().then((s) => setStatus(s.running));
+  });
+</script>
+</body>
+</html>

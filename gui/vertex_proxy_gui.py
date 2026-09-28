@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Vertex OpenAI Proxy - tray-based control panel.
+Vertex OpenAI Proxy - tray-based control panel (pywebview edition).
 
 Starts/stops/restarts the Node.js proxy server, edits .env (project id,
 location, model, port), and minimizes to the Windows system tray instead
-of leaving a console window open.
+of leaving a console window open. The UI is plain HTML/CSS/JS
+(gui/index.html) rendered by the OS's native web view (WebView2 on
+Windows); this file is only the backend/bridge.
 
 Run with: pythonw vertex_proxy_gui.py   (no console window)
       or: python  vertex_proxy_gui.py   (for debugging, shows console)
@@ -24,14 +26,13 @@ import urllib.request
 from tkinter import messagebox
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-CRASH_LOG_PATH = os.path.join(PROJECT_ROOT, "gui", "crash.log")
+GUI_DIR = os.path.dirname(os.path.abspath(__file__))
+CRASH_LOG_PATH = os.path.join(GUI_DIR, "crash.log")
 
 
 def log_crash(exc_type, exc_value, exc_tb):
     """pythonw.exe has no console, so an unhandled exception normally just
-    kills the process with zero visible output. Write it to a file instead,
-    and also install this as sys.excepthook / Tk's callback-exception hook so
-    errors from GUI callbacks (button clicks, etc.) get captured too."""
+    kills the process with zero visible output. Write it to a file instead."""
     try:
         with open(CRASH_LOG_PATH, "a", encoding="utf-8") as f:
             f.write("\n" + "=" * 70 + "\n")
@@ -44,14 +45,14 @@ def log_crash(exc_type, exc_value, exc_tb):
 sys.excepthook = log_crash
 
 try:
-    import customtkinter as ctk
+    import webview
 except Exception:
     log_crash(*sys.exc_info())
     _root = tk.Tk()
     _root.withdraw()
     messagebox.showerror(
         "Vertex OpenAI Proxy",
-        "customtkinter를 불러오지 못해 GUI를 시작할 수 없습니다.\n\n"
+        "pywebview를 불러오지 못해 GUI를 시작할 수 없습니다.\n\n"
         "PowerShell에서 다음을 실행해 설치해주세요:\n"
         "  python -m pip install -r gui\\requirements.txt\n\n"
         f"자세한 오류는 {CRASH_LOG_PATH} 파일을 확인하세요.",
@@ -66,16 +67,6 @@ except ImportError:
     pystray = None
     Image = None
     ImageDraw = None
-
-# ---------------------------------------------------------------------------
-# Theme
-# ---------------------------------------------------------------------------
-BEIGE = "#F1E3D3"
-BLACK = "#1A1A1A"
-BLACK_HOVER = "#333333"
-WHITE = "#FFFFFF"
-MUTED = "#5A4E42"
-FONT_NAME = "Segoe UI" if sys.platform == "win32" else "Helvetica"
 
 ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 
@@ -166,8 +157,6 @@ def write_env(values):
                 key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
                 if key in ENV_KEYS:
                     if key in seen:
-                        # Drop duplicate/stale lines for a key we already wrote
-                        # (e.g. leftover from the BOM bug above).
                         continue
                     lines.append(f"{key}={values[key]}")
                     seen.add(key)
@@ -176,7 +165,6 @@ def write_env(values):
     for key in ENV_KEYS:
         if key not in seen:
             lines.append(f"{key}={values[key]}")
-    # Plain "utf-8" (no BOM) on write, so the file stays BOM-free going forward.
     with open(ENV_PATH, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -193,254 +181,63 @@ def fetch_live_models(port):
 
 
 # ---------------------------------------------------------------------------
-# Main app
+# Backend bridge exposed to the HTML/JS front-end as `pywebview.api`
 # ---------------------------------------------------------------------------
-class ProxyGuiApp:
-    def __init__(self, lock_socket=None):
-        self.lock_socket = lock_socket
-
-        ctk.set_appearance_mode("light")
-        ctk.set_default_color_theme("dark-blue")
-
-        self.root = ctk.CTk()
-        self.root.report_callback_exception = log_crash
-        self.root.title("Vertex OpenAI Proxy")
-        try:
-            self.root.configure(fg_color=BEIGE)
-        except Exception:
-            self.root.configure(bg=BEIGE)
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
-        # NOTE: <Unmap> is bound later (after the window has actually been
-        # shown once) — see _arm_unmap_handler(). CTk's startup sequence can
-        # briefly report state()=="iconic" while it's still negotiating with
-        # the window manager, and binding this immediately made the window
-        # hide itself to the tray before the user ever saw it (process stays
-        # alive, mainloop keeps running, but no window and no obvious tray
-        # icon — looks exactly like "it silently died").
-        self._unmap_armed = False
-
+class Api:
+    def __init__(self):
+        self.window = None
         self.proc = None
-        self.log_queue = queue.Queue()
         self.tray_icon = None
+        self.lock_socket = None
 
-        self._build_ui()
-        self._load_env_into_fields()
+    # -- env --
+    def get_env(self):
+        return read_env()
 
-        # Size the window to fit its content, with a sane floor in case CTk's
-        # requested size isn't settled yet, and force it to the foreground —
-        # belt-and-braces against the window ending up invisible/off-screen.
-        self.root.update()
-        width = max(self.root.winfo_reqwidth(), 700)
-        height = max(self.root.winfo_reqheight(), 520)
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        x = max((screen_w - width) // 2, 0)
-        y = max((screen_h - height) // 2, 0)
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
-        self.root.minsize(min(width, 700), 360)
-        self.root.deiconify()
-        self.root.lift()
-        self.root.attributes("-topmost", True)
-        self.root.after(300, lambda: self.root.attributes("-topmost", False))
-        self.root.after(500, self._arm_unmap_handler)
+    def _validate_and_write(self, values):
+        if not values.get("GOOGLE_CLOUD_PROJECT_ID", "").strip():
+            return {"ok": False, "error": "Project ID를 입력해주세요."}
+        write_env(values)
+        self._log("[GUI] .env를 저장했습니다.\n")
+        return {"ok": True}
 
-        self.root.after(100, self._poll_log_queue)
+    def models(self, port):
+        return fetch_live_models(port or "3000")
 
-    def _arm_unmap_handler(self):
-        self._unmap_armed = True
-        self.root.bind("<Unmap>", self._on_unmap)
-
-    # -- UI ----------------------------------------------------------------
-    def _build_ui(self):
-        header = ctk.CTkLabel(self.root, text="Vertex OpenAI Proxy", bg_color=BEIGE,
-                               text_color=BLACK, font=(FONT_NAME, 20, "bold"))
-        header.pack(anchor="w", padx=20, pady=(20, 6))
-
-        status_row = ctk.CTkFrame(self.root, fg_color=BEIGE)
-        status_row.pack(anchor="w", padx=20, pady=(0, 14))
-        self.status_dot = ctk.CTkLabel(status_row, text="●", text_color="#B23B3B",
-                                        bg_color=BEIGE, font=(FONT_NAME, 12))
-        self.status_dot.pack(side="left")
-        self.status_label = ctk.CTkLabel(status_row, text="중지됨", bg_color=BEIGE,
-                                          text_color=BLACK, font=(FONT_NAME, 11, "bold"))
-        self.status_label.pack(side="left", padx=(6, 0))
-
-        form = ctk.CTkFrame(self.root, fg_color=BEIGE)
-        form.pack(fill="x", padx=20)
-
-        self.entry_project = self._add_field(form, "Google Cloud Project ID", maskable=True)
-        self.entry_location = self._add_field(form, "리전 (Location)")
-        self.combo_model = self._add_model_field(form, "Gemini 모델")
-        self.entry_port = self._add_field(form, "포트 (Port)")
-
-        btn_row = ctk.CTkFrame(self.root, fg_color=BEIGE)
-        btn_row.pack(fill="x", padx=20, pady=(16, 10))
-
-        self.btn_start = self._make_button(btn_row, "시작", self.start_server, width=90)
-        self.btn_stop = self._make_button(btn_row, "정지", self.stop_server, width=90)
-        self.btn_restart = self._make_button(btn_row, "재시작", self.restart_server, width=90)
-        self.btn_save = self._make_button(btn_row, "저장 후 재시작", self.save_and_restart, width=150)
-
-        for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_save):
-            b.pack(side="left", padx=(0, 10))
-
-        tray_hint = ctk.CTkLabel(
-            self.root,
-            text="창을 닫으면 트레이로 최소화됩니다. 완전히 종료하려면 트레이 아이콘 메뉴를 사용하세요.",
-            bg_color=BEIGE, text_color=MUTED, font=(FONT_NAME, 9),
-        )
-        tray_hint.pack(anchor="w", padx=20, pady=(0, 10))
-
-        # -- log (collapsible / accordion) --
-        log_header = ctk.CTkFrame(self.root, fg_color=BEIGE)
-        log_header.pack(fill="x", padx=20)
-        self.log_toggle_label = ctk.CTkLabel(log_header, text="▼  로그", bg_color=BEIGE,
-                                              text_color=BLACK, font=(FONT_NAME, 10, "bold"),
-                                              cursor="hand2")
-        self.log_toggle_label.pack(side="left")
-        self.log_toggle_label.bind("<Button-1>", lambda e: self._toggle_log())
-
-        self.log_visible = True
-        self.log_frame = ctk.CTkFrame(self.root, fg_color=BLACK, corner_radius=14)
-        self.log_frame.pack(fill="both", expand=True, padx=20, pady=(6, 20))
-        self.log_text = ctk.CTkTextbox(self.log_frame, fg_color=BLACK, text_color=WHITE,
-                                        corner_radius=14, border_width=0,
-                                        font=("Consolas", 10), wrap="word", height=220)
-        self.log_text.pack(fill="both", expand=True, padx=4, pady=4)
-        self.log_text.configure(state="disabled")
-
-    def _make_button(self, parent, text, command, width=90):
-        return ctk.CTkButton(parent, text=text, command=command, width=width, height=36,
-                              corner_radius=14, fg_color=BLACK, hover_color=BLACK_HOVER,
-                              text_color=WHITE, font=(FONT_NAME, 11, "bold"), border_width=0)
-
-    def _toggle_log(self):
-        self.log_visible = not self.log_visible
-        if self.log_visible:
-            self.log_frame.pack(fill="both", expand=True, padx=20, pady=(6, 20))
-            self.log_toggle_label.configure(text="▼  로그")
-        else:
-            self.log_frame.pack_forget()
-            self.log_toggle_label.configure(text="▶  로그")
-        self.root.after(10, self._resize_to_content)
-
-    def _resize_to_content(self):
-        width = self.root.winfo_width()
-        x = self.root.winfo_x()
-        y = self.root.winfo_y()
-        self.root.update_idletasks()
-        height = self.root.winfo_reqheight()
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
-
-    def _add_field(self, parent, label_text, maskable=False):
-        row = ctk.CTkFrame(parent, fg_color=BEIGE)
-        row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text=label_text, bg_color=BEIGE, text_color=BLACK,
-                     font=(FONT_NAME, 10, "bold"), width=190, anchor="w").pack(side="left")
-
-        entry_width = 400 if maskable else 440
-        entry = ctk.CTkEntry(row, width=entry_width, height=36, corner_radius=14,
-                              fg_color=BLACK, text_color=WHITE, border_width=0,
-                              font=(FONT_NAME, 11))
-        entry.pack(side="left")
-
-        if maskable:
-            entry._masked = True
-            entry.configure(show="•")
-            toggle = ctk.CTkButton(row, text="\U0001F441", width=36, height=36, corner_radius=12,
-                                    fg_color=BLACK, hover_color=BLACK_HOVER, text_color=WHITE,
-                                    font=(FONT_NAME, 12), border_width=0,
-                                    command=lambda: self._toggle_mask(entry, toggle))
-            toggle.pack(side="left", padx=(6, 0))
-        return entry
-
-    def _toggle_mask(self, entry, toggle_button):
-        masked = not getattr(entry, "_masked", True)
-        entry._masked = masked
-        entry.configure(show="•" if masked else "")
-        toggle_button.configure(text="\U0001F441" if masked else "\U0001F576")
-
-    def _add_model_field(self, parent, label_text):
-        row = ctk.CTkFrame(parent, fg_color=BEIGE)
-        row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text=label_text, bg_color=BEIGE, text_color=BLACK,
-                     font=(FONT_NAME, 10, "bold"), width=190, anchor="w").pack(side="left")
-        combo = ctk.CTkComboBox(row, values=FALLBACK_MODELS, width=440, height=36,
-                                 corner_radius=14, fg_color=BLACK, text_color=WHITE,
-                                 button_color=BLACK_HOVER, button_hover_color=BLACK_HOVER,
-                                 dropdown_fg_color=BLACK, dropdown_text_color=WHITE,
-                                 border_width=0, font=(FONT_NAME, 11))
-        combo.pack(side="left")
-        return combo
-
-    # -- env <-> fields ------------------------------------------------------
-    def _load_env_into_fields(self):
-        values = read_env()
-        self.entry_project.delete(0, tk.END)
-        self.entry_project.insert(0, values["GOOGLE_CLOUD_PROJECT_ID"])
-        self.entry_location.delete(0, tk.END)
-        self.entry_location.insert(0, values["GOOGLE_CLOUD_LOCATION"])
-        self.entry_port.delete(0, tk.END)
-        self.entry_port.insert(0, values["PORT"])
-        self.combo_model.set(values["GOOGLE_CLOUD_MODEL_ID"])
-
-        live_models = fetch_live_models(values["PORT"])
-        merged = list(dict.fromkeys(live_models + FALLBACK_MODELS))
-        self.combo_model.configure(values=merged)
-
-    def _fields_to_env(self):
-        return {
-            "GOOGLE_CLOUD_PROJECT_ID": self.entry_project.get().strip(),
-            "GOOGLE_CLOUD_LOCATION": self.entry_location.get().strip() or "global",
-            "GOOGLE_CLOUD_MODEL_ID": self.combo_model.get().strip() or "gemini-3.7-flash",
-            "PORT": self.entry_port.get().strip() or "3000",
-        }
-
-    def _sync_env_if_changed(self):
-        """Compare the form fields against the .env on disk; save if they differ.
-        Returns False (and shows a warning) only if the fields are invalid."""
-        current = read_env()
-        new_values = self._fields_to_env()
-        if not new_values["GOOGLE_CLOUD_PROJECT_ID"]:
-            messagebox.showwarning("확인 필요", "Project ID를 입력해주세요.")
-            return False
-        if current != new_values:
-            write_env(new_values)
-            self._append_log("[GUI] 변경된 설정을 감지해 .env에 저장했습니다.\n")
-        return True
-
-    # -- server process control ----------------------------------------------
-    def _append_log(self, line):
-        self.log_queue.put(line)
-
-    def _poll_log_queue(self):
-        try:
-            while True:
-                line = self.log_queue.get_nowait()
-                self.log_text.configure(state="normal")
-                self.log_text.insert(tk.END, line)
-                self.log_text.see(tk.END)
-                self.log_text.configure(state="disabled")
-        except queue.Empty:
-            pass
-        self.root.after(150, self._poll_log_queue)
+    # -- log / status --
+    def _log(self, line):
+        if self.window:
+            try:
+                self.window.evaluate_js(f"appendLog({json.dumps(line)})")
+            except Exception:
+                pass
 
     def _set_status(self, running):
-        color = "#3B8F5C" if running else "#B23B3B"
-        text = "실행 중" if running else "중지됨"
-        self.status_dot.configure(text_color=color)
-        self.status_label.configure(text=text)
+        if self.window:
+            try:
+                self.window.evaluate_js(f"setStatus({'true' if running else 'false'})")
+            except Exception:
+                pass
 
-    def start_server(self):
+    def status(self):
+        return {"running": bool(self.proc and self.proc.poll() is None)}
+
+    # -- server process control --
+    def start(self, fields=None):
         if self.proc and self.proc.poll() is None:
-            self._append_log("[GUI] 이미 실행 중입니다.\n")
-            return
-        if not self._sync_env_if_changed():
-            return
+            self._log("[GUI] 이미 실행 중입니다.\n")
+            return {"ok": True}
+
+        if fields:
+            current = read_env()
+            if current != fields:
+                result = self._validate_and_write(fields)
+                if not result["ok"]:
+                    return result
+
         node_path = shutil.which("node")
         if not node_path:
-            messagebox.showerror("오류", "node 실행 파일을 찾을 수 없습니다. Node.js가 설치되어 있는지 확인해주세요.")
-            return
+            return {"ok": False, "error": "node 실행 파일을 찾을 수 없습니다. Node.js가 설치되어 있는지 확인해주세요."}
 
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         try:
@@ -454,50 +251,73 @@ class ProxyGuiApp:
                 creationflags=creationflags,
             )
         except Exception as exc:
-            messagebox.showerror("오류", f"서버 시작 실패: {exc}")
-            return
+            return {"ok": False, "error": f"서버 시작 실패: {exc}"}
 
         self._set_status(True)
-        self._append_log("[GUI] 서버를 시작했습니다.\n")
+        self._log("[GUI] 서버를 시작했습니다.\n")
         threading.Thread(target=self._read_process_output, daemon=True).start()
+        return {"ok": True}
 
     def _read_process_output(self):
         proc = self.proc
         if not proc or not proc.stdout:
             return
         for line in iter(proc.stdout.readline, ""):
-            self._append_log(line)
+            self._log(line)
         proc.stdout.close()
-        self.root.after(0, lambda: self._set_status(False))
-        self._append_log("[GUI] 서버 프로세스가 종료되었습니다.\n")
+        self._set_status(False)
+        self._log("[GUI] 서버 프로세스가 종료되었습니다.\n")
 
-    def stop_server(self):
+    def stop(self):
         if not self.proc or self.proc.poll() is not None:
-            self._append_log("[GUI] 실행 중인 서버가 없습니다.\n")
+            self._log("[GUI] 실행 중인 서버가 없습니다.\n")
             self._set_status(False)
-            return
+            return {"ok": True}
         try:
             self.proc.terminate()
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
         self._set_status(False)
-        self._append_log("[GUI] 서버를 정지했습니다.\n")
+        self._log("[GUI] 서버를 정지했습니다.\n")
+        return {"ok": True}
 
-    def restart_server(self):
-        self.stop_server()
-        self.root.after(300, self.start_server)
+    def restart(self, fields=None):
+        self.stop()
+        time.sleep(0.3)
+        return self.start(fields)
 
-    def save_and_restart(self):
-        values = self._fields_to_env()
-        if not values["GOOGLE_CLOUD_PROJECT_ID"]:
-            messagebox.showwarning("확인 필요", "Project ID를 입력해주세요.")
+    def save_and_restart(self, fields):
+        result = self._validate_and_write(fields or {})
+        if not result["ok"]:
+            return result
+        return self.restart(fields)
+
+    # -- tray / lifecycle --
+    def hide_to_tray(self):
+        if self.window:
+            self.window.hide()
+        if pystray is None:
+            _root = tk.Tk()
+            _root.withdraw()
+            messagebox.showinfo(
+                "트레이 사용 불가",
+                "pystray/Pillow가 설치되어 있지 않아 트레이로 내려갈 수 없습니다.\n"
+                "'pip install -r gui/requirements.txt'를 실행해주세요.",
+            )
+            _root.destroy()
             return
-        write_env(values)
-        self._append_log("[GUI] .env를 저장했습니다. 서버를 재시작합니다...\n")
-        self.restart_server()
+        if self.tray_icon is None:
+            image = self._make_tray_image()
+            menu = pystray.Menu(
+                pystray.MenuItem("열기", self._show_from_tray, default=True),
+                pystray.MenuItem("서버 재시작", lambda: self.restart()),
+                pystray.MenuItem("GUI 재시작 (프로세스 재시작)", self._restart_app_from_tray),
+                pystray.MenuItem("완전히 종료", self._quit_from_tray),
+            )
+            self.tray_icon = pystray.Icon("vertex-openai-proxy", image, "Vertex OpenAI Proxy", menu)
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
-    # -- tray -----------------------------------------------------------------
     def _make_tray_image(self):
         if Image is None:
             return None
@@ -508,39 +328,9 @@ class ProxyGuiApp:
         draw.text((size / 2 - 8, size / 2 - 14), "V", fill=(255, 255, 255, 255))
         return img
 
-    def _on_unmap(self, _event):
-        if self._unmap_armed and self.root.state() == "iconic":
-            self.hide_to_tray()
-
-    def hide_to_tray(self):
-        self.root.withdraw()
-        if pystray is None:
-            messagebox.showinfo(
-                "트레이 사용 불가",
-                "pystray/Pillow가 설치되어 있지 않아 트레이로 내려갈 수 없습니다.\n"
-                "설치 스크립트를 다시 실행하거나 'pip install -r gui/requirements.txt'를 실행해주세요.\n"
-                "창을 다시 열려면 이 앱을 재실행하세요.",
-            )
-            return
-        if self.tray_icon is None:
-            image = self._make_tray_image()
-            menu = pystray.Menu(
-                pystray.MenuItem("열기", self._show_from_tray, default=True),
-                pystray.MenuItem("서버 재시작", lambda: self.root.after(0, self.restart_server)),
-                pystray.MenuItem("GUI 재시작 (프로세스 재시작)", self._restart_app_from_tray),
-                pystray.MenuItem("완전히 종료", self._quit_from_tray),
-            )
-            self.tray_icon = pystray.Icon("vertex-openai-proxy", image, "Vertex OpenAI Proxy", menu)
-            threading.Thread(target=self.tray_icon.run, daemon=True).start()
-
     def _show_from_tray(self, _icon=None, _item=None):
-        self.root.after(0, self._deiconify)
-
-    def _deiconify(self):
-        self.root.deiconify()
-        self.root.state("normal")
-        self.root.lift()
-        self.root.focus_force()
+        if self.window:
+            self.window.show()
 
     def _quit_from_tray(self, _icon=None, _item=None):
         self._shutdown(relaunch=False)
@@ -550,19 +340,12 @@ class ProxyGuiApp:
 
     def _shutdown(self, relaunch):
         """Tears down the app and (optionally) relaunches a fresh process.
-
-        pystray menu callbacks run on pystray's own background thread, not
-        the Tk main thread, and Tkinter isn't reliably thread-safe — under
-        some timing, root.after()/root.destroy() calls from that thread never
-        actually fire, leaving a zombie process holding the single-instance
-        port open forever (every future launch then just sees "already
-        running" and does nothing). A watchdog timer guarantees the process
-        dies regardless of what the Tk main loop is doing.
-        """
+        A watchdog timer guarantees the process dies even if webview/tray
+        teardown hangs for any reason."""
         threading.Timer(1.5, lambda: os._exit(0)).start()
 
         try:
-            self.stop_server()
+            self.stop()
         except Exception:
             pass
         if self.tray_icon:
@@ -586,12 +369,35 @@ class ProxyGuiApp:
             except Exception:
                 pass
         try:
-            self.root.after(0, self.root.destroy)
+            if self.window:
+                self.window.destroy()
         except Exception:
             pass
 
-    def run(self):
-        self.root.mainloop()
+
+def main(lock_socket):
+    api = Api()
+    api.lock_socket = lock_socket
+
+    index_path = os.path.join(GUI_DIR, "index.html")
+    window = webview.create_window(
+        "Vertex OpenAI Proxy",
+        index_path,
+        js_api=api,
+        width=760,
+        height=640,
+        min_size=(680, 420),
+        background_color="#F1E3D3",
+    )
+    api.window = window
+
+    def on_closing():
+        api.hide_to_tray()
+        return False  # cancel the actual close; we just hid the window
+
+    window.events.closing += on_closing
+
+    webview.start(debug=False)
 
 
 if __name__ == "__main__":
@@ -618,7 +424,6 @@ if __name__ == "__main__":
         if existing_pid:
             kill_pid(existing_pid)
 
-        # Give the old process a moment to release the port, then retry.
         for _ in range(20):
             lock_socket = acquire_single_instance_lock()
             if lock_socket:
@@ -637,7 +442,7 @@ if __name__ == "__main__":
 
     write_lock_pid()
     try:
-        ProxyGuiApp(lock_socket=lock_socket).run()
+        main(lock_socket)
     except Exception:
         log_crash(*sys.exc_info())
         try:

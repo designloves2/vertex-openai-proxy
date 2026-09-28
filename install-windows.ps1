@@ -204,9 +204,9 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 # ---------------------------------------------------------------------------
-# 8. 실행용 GUI 런처(.bat) 생성
+# 8. 실행용 런처(.bat) 생성 — 콘솔용 + GUI용 둘 다
 # ---------------------------------------------------------------------------
-Step "8/9 실행용 GUI 런처 생성"
+Step "8/9 실행용 런처 생성"
 $pythonExePath = (Get-Command $pythonCmd -ErrorAction SilentlyContinue).Source
 $pythonwExePath = $null
 if ($pythonExePath) {
@@ -215,10 +215,26 @@ if ($pythonExePath) {
 }
 if (-not $pythonwExePath) { $pythonwExePath = $pythonExePath }
 
+# Plain console launcher — always works, no Python/GUI dependency at all.
+# Use this if the GUI ever has trouble on your machine.
 $runBatPath = Join-Path $PSScriptRoot "vertex-openai-proxy-run.bat"
 $runBatContent = @"
 @echo off
-REM Double-click this file to open the Vertex OpenAI Proxy control panel.
+REM Double-click this file to start the vertex-openai-proxy server directly
+REM in a console window (no GUI). Always works as long as npm install succeeded.
+cd /d "%~dp0"
+npm run start
+pause
+"@
+Set-Content -Path $runBatPath -Value $runBatContent -Encoding ASCII
+Write-Host "생성됨: $runBatPath (콘솔 실행용, 항상 동작하는 안전한 방법)"
+
+# GUI launcher — installs/refreshes its Python deps every time, then opens
+# the control panel with no console window.
+$guiRunBatPath = Join-Path $PSScriptRoot "vertex-openai-proxy-GUI-run.bat"
+$guiRunBatContent = @"
+@echo off
+REM Double-click this file to open the Vertex OpenAI Proxy GUI control panel.
 cd /d "%~dp0"
 REM Make sure the GUI's Python packages are up to date before launching, so a
 REM future update to gui\requirements.txt (e.g. adding a new package) doesn't
@@ -226,19 +242,23 @@ REM require re-running the full installer.
 "$pythonExePath" -m pip install --quiet -r "%~dp0gui\requirements.txt"
 start "" "$pythonwExePath" "%~dp0gui\vertex_proxy_gui.py"
 "@
-Set-Content -Path $runBatPath -Value $runBatContent -Encoding ASCII
-Write-Host "생성됨: $runBatPath"
-Write-Host "다음부터는 이 파일을 더블클릭하면 GUI 제어판이 열립니다 (실행 전 필요한 Python 패키지를 자동으로 맞춰줍니다)."
+Set-Content -Path $guiRunBatPath -Value $guiRunBatContent -Encoding ASCII
+Write-Host "생성됨: $guiRunBatPath (GUI 제어판용, 실행 전 필요한 Python 패키지를 자동으로 맞춰줍니다)"
 
 # ---------------------------------------------------------------------------
-# 9. 완료 및 GUI 실행
+# 9. 완료 및 실행
 # ---------------------------------------------------------------------------
 Step "9/9 설치 완료"
 Write-Host "모든 준비가 끝났습니다!"
 Write-Host ""
+Write-Host "다음부터는 아래 둘 중 하나를 더블클릭하세요:"
+Write-Host "  vertex-openai-proxy-run.bat      -> 콘솔 창 (항상 동작)"
+Write-Host "  vertex-openai-proxy-GUI-run.bat  -> GUI 제어판"
+Write-Host ""
 $StartNow = Read-Host "지금 GUI 제어판을 열까요? (y/N)"
 if ($StartNow -match '^[Yy]') {
+    & $pythonExePath -m pip install --quiet -r (Join-Path $PSScriptRoot "gui\requirements.txt")
     Start-Process -FilePath $pythonwExePath -ArgumentList (Join-Path $PSScriptRoot "gui\vertex_proxy_gui.py")
 } else {
-    Write-Host "나중에 시작하려면 vertex-openai-proxy-run.bat 파일을 더블클릭하세요."
+    Write-Host "나중에 시작하려면 위 두 파일 중 하나를 더블클릭하세요."
 }

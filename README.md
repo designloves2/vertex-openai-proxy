@@ -31,7 +31,9 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 > If Node.js, the Google Cloud CLI, or Python had to be installed, the installer refreshes `PATH` automatically and continues in the same window. If a tool still isn't picked up, it'll ask you to close the window and re-run once.
 
-The installer also sets up Python (used only for the GUI) and generates **`vertex-openai-proxy-run.bat`** — double-click it any time afterward to open the GUI control panel instead of a bare console window.
+The installer also sets up Python (used only for the GUI) and generates two launchers:
+- **`vertex-openai-proxy-run.bat`** — plain console window running `npm run start`. Always works; use this if the GUI ever gives you trouble.
+- **`vertex-openai-proxy-GUI-run.bat`** — opens the GUI control panel (no console window). Re-checks/installs its Python packages every time before launching, so a future dependency change doesn't require re-running the whole installer.
 
 **macOS:**
 ```bash
@@ -83,21 +85,24 @@ The proxy listens on `http://localhost:3000` by default (override with `PORT`).
 
 ## 🖥️ GUI control panel (Windows)
 
-Instead of a bare console window, Windows users get a small desktop app (`gui/vertex_proxy_gui.py`) for managing the proxy:
+Windows users get a small desktop app for managing the proxy, instead of a bare console window. The UI is plain HTML/CSS/JS (`gui/index.html`) rendered by the OS's native web view (WebView2); `gui/vertex_proxy_gui.py` is just the Python backend/bridge (server process control, `.env` read/write, system tray).
 
 ![Vertex OpenAI Proxy GUI](docs/screenshot-gui.png)
 
 - **Start / Stop / Restart** the Node server as a background process (no console window).
-- **Edit settings live:** Project ID, Location, Gemini model (dropdown — also pulls the currently registered models from a running server's `/v1/models`), and Port.
+- **Edit settings live:** Project ID (masked by default, with a show/hide toggle), Location, Gemini model (dropdown — also pulls the currently registered models from a running server's `/v1/models`), and Port.
 - **Auto-saves `.env`:** if you change a field and click Start/Restart, the app detects the change and writes `.env` before launching, so the server never runs with stale settings.
 - **Live log panel:** collapsible (▼/▶) so it doesn't have to take up the whole window.
-- **System tray:** closing the window minimizes it to the Windows system tray instead of quitting. Use the tray icon's menu (열기 / 서버 재시작 / 완전히 종료) to reopen, restart, or fully exit.
+- **System tray:** closing the window minimizes it to the Windows system tray instead of quitting. The tray menu offers 열기 (reopen), 서버 재시작 (restart just the Node process), GUI 재시작 (fully restart this app's own process), and 완전히 종료 (quit for good).
+- **Single-instance guard:** launching a second copy asks whether to terminate the existing one and open fresh, instead of silently doing nothing.
 
-Launch it any time with `vertex-openai-proxy-run.bat`, or manually:
+Launch it any time with `vertex-openai-proxy-GUI-run.bat`, or manually:
 ```powershell
 pythonw gui\vertex_proxy_gui.py
 ```
-Requires Python 3 + the packages in `gui/requirements.txt` (`pystray`, `Pillow`) — both are installed automatically by `install-windows.ps1`.
+Requires Python 3 + the packages in `gui/requirements.txt` (`pywebview`, `pythonnet` on Windows, `pystray`, `Pillow`) — installed automatically by `install-windows.ps1`, and re-checked every time `vertex-openai-proxy-GUI-run.bat` runs.
+
+If the GUI ever fails to start, check `gui/crash.log` (written on any unhandled error, since `pythonw.exe` has no console to show one) — or just use `vertex-openai-proxy-run.bat` instead, which runs the server directly with no GUI dependency at all.
 
 ## 🤖 Configuring your AI Agents
 
