@@ -106,11 +106,11 @@ if (Test-Path $envPath) {
         $GcpProjectId = Read-Host "Project ID는 필수입니다. 다시 입력해주세요"
     }
 
-    $GcpLocation = Read-Host "Vertex AI 리전을 입력하세요 [기본값: us-central1]"
-    if ([string]::IsNullOrWhiteSpace($GcpLocation)) { $GcpLocation = "us-central1" }
+    $GcpLocation = Read-Host "Vertex AI 리전을 입력하세요 [기본값: global]"
+    if ([string]::IsNullOrWhiteSpace($GcpLocation)) { $GcpLocation = "global" }
 
-    $GcpModelId = Read-Host "사용할 Gemini 모델 ID [기본값: gemini-2.0-flash-001]"
-    if ([string]::IsNullOrWhiteSpace($GcpModelId)) { $GcpModelId = "gemini-2.0-flash-001" }
+    $GcpModelId = Read-Host "사용할 Gemini 모델 ID [기본값: gemini-3.7-flash]"
+    if ([string]::IsNullOrWhiteSpace($GcpModelId)) { $GcpModelId = "gemini-3.7-flash" }
 
     $ServerPort = Read-Host "로컬 서버 포트 [기본값: 3000]"
     if ([string]::IsNullOrWhiteSpace($ServerPort)) { $ServerPort = "3000" }

@@ -87,11 +87,11 @@ else
         read -rp "Project ID는 필수입니다. 다시 입력해주세요: " GCP_PROJECT_ID
     done
 
-    read -rp "Vertex AI 리전을 입력하세요 [기본값: us-central1]: " GCP_LOCATION
-    GCP_LOCATION="${GCP_LOCATION:-us-central1}"
+    read -rp "Vertex AI 리전을 입력하세요 [기본값: global]: " GCP_LOCATION
+    GCP_LOCATION="${GCP_LOCATION:-global}"
 
-    read -rp "사용할 Gemini 모델 ID [기본값: gemini-2.0-flash-001]: " GCP_MODEL_ID
-    GCP_MODEL_ID="${GCP_MODEL_ID:-gemini-2.0-flash-001}"
+    read -rp "사용할 Gemini 모델 ID [기본값: gemini-3.7-flash]: " GCP_MODEL_ID
+    GCP_MODEL_ID="${GCP_MODEL_ID:-gemini-3.7-flash}"
 
     read -rp "로컬 서버 포트 [기본값: 3000]: " SERVER_PORT
     SERVER_PORT="${SERVER_PORT:-3000}"
