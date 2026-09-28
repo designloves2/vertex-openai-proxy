@@ -102,6 +102,14 @@ try {
     $sendCommandPath = Join-Path $ScriptDir "SendCommand.vbs"
     $script:WpfApp = [System.Windows.Application]::Current
     if (-not $script:WpfApp) { $script:WpfApp = New-Object System.Windows.Application }
+    # Without this, WPF's own Application object defaults to ShutdownMode
+    # "OnLastWindowClose" and auto-tracks any Window created while
+    # Application.Current exists (which $window, created further below,
+    # will be) — so the whole process can quit itself out from under our
+    # own Closing handler's e.Cancel/Hide() hide-to-tray logic. This
+    # Application object only exists to host the Jump List; it must never
+    # drive process lifetime on its own.
+    $script:WpfApp.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown
 
     $jumpList = New-Object System.Windows.Shell.JumpList
     foreach ($t in @(
