@@ -258,6 +258,19 @@ class ProxyGuiApp:
             "PORT": self.entry_port.get().strip() or "3000",
         }
 
+    def _sync_env_if_changed(self):
+        """Compare the form fields against the .env on disk; save if they differ.
+        Returns False (and shows a warning) only if the fields are invalid."""
+        current = read_env()
+        new_values = self._fields_to_env()
+        if not new_values["GOOGLE_CLOUD_PROJECT_ID"]:
+            messagebox.showwarning("확인 필요", "Project ID를 입력해주세요.")
+            return False
+        if current != new_values:
+            write_env(new_values)
+            self._append_log("[GUI] 변경된 설정을 감지해 .env에 저장했습니다.\n")
+        return True
+
     # -- server process control ----------------------------------------------
     def _append_log(self, line):
         self.log_queue.put(line)
@@ -283,6 +296,8 @@ class ProxyGuiApp:
     def start_server(self):
         if self.proc and self.proc.poll() is None:
             self._append_log("[GUI] 이미 실행 중입니다.\n")
+            return
+        if not self._sync_env_if_changed():
             return
         node_path = shutil.which("node")
         if not node_path:
