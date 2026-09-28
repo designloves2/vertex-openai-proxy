@@ -11,13 +11,14 @@
         powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 #>
 
-$ErrorActionPreference = "Stop"
-# PowerShell 7.3+ turns any stderr output from an external program (gcloud, npm, ...)
-# into a terminating error when $ErrorActionPreference is "Stop", even if the program
-# exited successfully. gcloud prints informational warnings/notices to stderr
-# routinely, so disable that behavior globally and check $LASTEXITCODE ourselves
-# where it matters. On PowerShell 5.1 this variable doesn't exist and simply has
-# no effect, which is harmless.
+# NOTE: deliberately not $ErrorActionPreference = "Stop".
+# gcloud's own PowerShell wrapper (gcloud.ps1) calls Write-Error internally
+# whenever the underlying python.exe process writes anything to stderr, even
+# on success (quota project notices, "Updated property [core/project]", etc).
+# Write-Error honors the *caller's* $ErrorActionPreference, so "Stop" here
+# would abort the whole script on those harmless notices. We use "Continue"
+# and check $LASTEXITCODE ourselves wherever a failure actually matters.
+$ErrorActionPreference = "Continue"
 $PSNativeCommandUseErrorActionPreference = $false
 Set-Location -Path $PSScriptRoot
 
@@ -86,6 +87,11 @@ Write-Host "gcloud 확인됨: $(gcloud --version | Select-Object -First 1)"
 # ---------------------------------------------------------------------------
 Step "4/8 npm 의존성 설치"
 npm install
+if ($LASTEXITCODE -ne 0) {
+    Err "npm install에 실패했습니다. 위 오류 메시지를 확인해주세요."
+    Read-Host "계속하려면 Enter를 누르세요"
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # 5. .env 설정
@@ -128,6 +134,12 @@ $ProjectIdValue = ($envLines | Where-Object { $_ -match '^GOOGLE_CLOUD_PROJECT_I
 Step "6/8 Google Cloud 인증 (Application Default Credentials)"
 Write-Host "브라우저 창이 열립니다. Google 계정으로 로그인 후 권한을 승인해주세요."
 gcloud auth application-default login
+if ($LASTEXITCODE -ne 0) {
+    Err "Google 인증에 실패했습니다. 다시 실행해 로그인을 완료해주세요."
+    Read-Host "계속하려면 Enter를 누르세요"
+    exit 1
+}
+Write-Host "인증 완료."
 
 Write-Host "gcloud 기본 프로젝트를 $ProjectIdValue 로 설정합니다..."
 gcloud config set project "$ProjectIdValue" 2>&1 | Out-Null
