@@ -13,6 +13,7 @@ import io
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -51,6 +52,21 @@ FALLBACK_MODELS = [
 
 ENV_KEYS = ["GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_MODEL_ID", "PORT"]
 
+# Arbitrary local-only port used purely as a single-instance mutex: binding it
+# fails if another copy of this GUI is already running.
+SINGLE_INSTANCE_PORT = 47123
+
+
+def acquire_single_instance_lock():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+        s.listen(1)
+        return s
+    except OSError:
+        s.close()
+        return None
+
 
 # ---------------------------------------------------------------------------
 # .env helpers (only touch the keys we manage; leave everything else as-is)
@@ -59,7 +75,10 @@ def read_env():
     values = {"GOOGLE_CLOUD_PROJECT_ID": "", "GOOGLE_CLOUD_LOCATION": "global",
               "GOOGLE_CLOUD_MODEL_ID": "gemini-3.7-flash", "PORT": "3000"}
     if os.path.exists(ENV_PATH):
-        with open(ENV_PATH, "r", encoding="utf-8") as f:
+        # utf-8-sig: PowerShell's `Set-Content -Encoding UTF8` writes a BOM,
+        # which (with plain "utf-8") gets glued onto the first line's key and
+        # makes it fail to match, silently dropping that value from the form.
+        with open(ENV_PATH, "r", encoding="utf-8-sig") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -75,11 +94,15 @@ def write_env(values):
     lines = []
     seen = set()
     if os.path.exists(ENV_PATH):
-        with open(ENV_PATH, "r", encoding="utf-8") as f:
+        with open(ENV_PATH, "r", encoding="utf-8-sig") as f:
             for line in f:
                 stripped = line.rstrip("\n")
                 key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
                 if key in ENV_KEYS:
+                    if key in seen:
+                        # Drop duplicate/stale lines for a key we already wrote
+                        # (e.g. leftover from the BOM bug above).
+                        continue
                     lines.append(f"{key}={values[key]}")
                     seen.add(key)
                 else:
@@ -87,6 +110,7 @@ def write_env(values):
     for key in ENV_KEYS:
         if key not in seen:
             lines.append(f"{key}={values[key]}")
+    # Plain "utf-8" (no BOM) on write, so the file stays BOM-free going forward.
     with open(ENV_PATH, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -139,6 +163,9 @@ class RoundedButton(tk.Canvas):
         self.itemconfig(self._shape, fill=state_color, outline=state_color)
         self.command_enabled = enabled
 
+    def set_text(self, text):
+        self.itemconfig(self._label, text=text)
+
 
 def _round_rect_points(x1, y1, x2, y2, r):
     return [
@@ -170,6 +197,9 @@ class RoundedEntry(tk.Canvas):
 
     def delete(self, first, last=None):
         return self.entry.delete(first, last)
+
+    def set_masked(self, masked):
+        self.entry.configure(show="•" if masked else "")
 
 
 class RoundedCombo(tk.Canvas):
@@ -215,12 +245,11 @@ class RoundedCombo(tk.Canvas):
 # Main app
 # ---------------------------------------------------------------------------
 class ProxyGuiApp:
-    def __init__(self):
+    def __init__(self, lock_socket=None):
+        self.lock_socket = lock_socket
         self.root = tk.Tk()
         self.root.title("Vertex OpenAI Proxy")
         self.root.configure(bg=BEIGE)
-        self.root.geometry("760x620")
-        self.root.minsize(720, 480)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         self.root.bind("<Unmap>", self._on_unmap)
 
@@ -230,6 +259,15 @@ class ProxyGuiApp:
 
         self._build_ui()
         self._load_env_into_fields()
+
+        # Size the window to fit its content exactly (no leftover margin),
+        # instead of an arbitrary fixed geometry.
+        self.root.update_idletasks()
+        width = self.root.winfo_reqwidth()
+        height = self.root.winfo_reqheight()
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(width, 360)
+
         self.root.after(100, self._poll_log_queue)
 
     # -- UI ----------------------------------------------------------------
@@ -251,7 +289,7 @@ class ProxyGuiApp:
         form = tk.Frame(self.root, bg=BEIGE)
         form.pack(fill="x", padx=16)
 
-        self.entry_project = self._add_field(form, "Google Cloud Project ID")
+        self.entry_project = self._add_field(form, "Google Cloud Project ID", maskable=True)
         self.entry_location = self._add_field(form, "리전 (Location)")
         self.combo_model = self._add_model_field(form, "Gemini 모델")
         self.entry_port = self._add_field(form, "포트 (Port)")
@@ -283,7 +321,7 @@ class ProxyGuiApp:
         self.log_frame = tk.Frame(self.root, bg=BLACK)
         self.log_frame.pack(fill="both", expand=True, padx=16, pady=(4, 16))
         self.log_text = tk.Text(self.log_frame, bg=BLACK, fg=WHITE, insertbackground=WHITE,
-                                 relief="flat", bd=0, font=("Consolas", 9), wrap="word")
+                                 relief="flat", bd=0, font=("Consolas", 9), wrap="word", height=12)
         self.log_text.pack(fill="both", expand=True, padx=1, pady=1)
         self.log_text.configure(state="disabled")
 
@@ -295,15 +333,37 @@ class ProxyGuiApp:
         else:
             self.log_frame.pack_forget()
             self.log_toggle_label.configure(text="▶  로그")
+        self.root.after(10, self._resize_to_content)
 
-    def _add_field(self, parent, label_text):
+    def _resize_to_content(self):
+        width = self.root.winfo_width()
+        x = self.root.winfo_x()
+        y = self.root.winfo_y()
+        self.root.update_idletasks()
+        height = self.root.winfo_reqheight()
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _add_field(self, parent, label_text, maskable=False):
         row = tk.Frame(parent, bg=BEIGE)
         row.pack(fill="x", pady=4)
         tk.Label(row, text=label_text, bg=BEIGE, fg=BLACK, font=(FONT_NAME, 9, "bold"),
                  width=24, anchor="w").pack(side="left")
-        entry = RoundedEntry(row, width=440, height=36)
+        entry_width = 440 - 42 if maskable else 440
+        entry = RoundedEntry(row, width=entry_width, height=36)
         entry.pack(side="left")
+        if maskable:
+            entry._masked = True
+            entry.set_masked(True)
+            toggle = RoundedButton(row, "\U0001F441", lambda: self._toggle_mask(entry, toggle),
+                                    width=36, height=36, radius=12, font_size=12)
+            toggle.pack(side="left", padx=(6, 0))
         return entry
+
+    def _toggle_mask(self, entry, toggle_button):
+        masked = not getattr(entry, "_masked", True)
+        entry._masked = masked
+        entry.set_masked(masked)
+        toggle_button.set_text("\U0001F441" if masked else "\U0001F576")
 
     def _add_model_field(self, parent, label_text):
         row = tk.Frame(parent, bg=BEIGE)
@@ -468,6 +528,7 @@ class ProxyGuiApp:
             menu = pystray.Menu(
                 pystray.MenuItem("열기", self._show_from_tray, default=True),
                 pystray.MenuItem("서버 재시작", lambda: self.root.after(0, self.restart_server)),
+                pystray.MenuItem("GUI 재시작 (프로세스 재시작)", self._restart_app_from_tray),
                 pystray.MenuItem("완전히 종료", self._quit_from_tray),
             )
             self.tray_icon = pystray.Icon("vertex-openai-proxy", image, "Vertex OpenAI Proxy", menu)
@@ -491,9 +552,34 @@ class ProxyGuiApp:
         self.stop_server()
         self.root.destroy()
 
+    def _restart_app_from_tray(self, _icon=None, _item=None):
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.root.after(0, self._restart_app)
+
+    def _restart_app(self):
+        """Fully exit this GUI process and launch a brand new one (not just
+        the Node server) — for when the GUI itself needs a clean restart."""
+        self.stop_server()
+        if self.lock_socket:
+            self.lock_socket.close()
+        try:
+            subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=PROJECT_ROOT)
+        except Exception as exc:
+            messagebox.showerror("오류", f"GUI 재시작 실패: {exc}")
+        self.root.destroy()
+        sys.exit(0)
+
     def run(self):
         self.root.mainloop()
 
 
 if __name__ == "__main__":
-    ProxyGuiApp().run()
+    lock_socket = acquire_single_instance_lock()
+    if lock_socket is None:
+        _root = tk.Tk()
+        _root.withdraw()
+        messagebox.showinfo("Vertex OpenAI Proxy", "이미 실행 중입니다. 시스템 트레이를 확인하세요.")
+        _root.destroy()
+        sys.exit(0)
+    ProxyGuiApp(lock_socket=lock_socket).run()
