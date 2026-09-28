@@ -457,31 +457,47 @@ class ProxyGuiApp:
         self.root.focus_force()
 
     def _quit_from_tray(self, _icon=None, _item=None):
-        if self.tray_icon:
-            self.tray_icon.stop()
-        self.root.after(0, self._quit)
-
-    def _quit(self):
-        self.stop_server()
-        self.root.destroy()
+        self._shutdown(relaunch=False)
 
     def _restart_app_from_tray(self, _icon=None, _item=None):
-        if self.tray_icon:
-            self.tray_icon.stop()
-        self.root.after(0, self._restart_app)
+        self._shutdown(relaunch=True)
 
-    def _restart_app(self):
-        """Fully exit this GUI process and launch a brand new one (not just
-        the Node server) — for when the GUI itself needs a clean restart."""
-        self.stop_server()
-        if self.lock_socket:
-            self.lock_socket.close()
+    def _shutdown(self, relaunch):
+        """Tears down the app and (optionally) relaunches a fresh process.
+
+        pystray menu callbacks run on pystray's own background thread, not
+        the Tk main thread, and Tkinter isn't reliably thread-safe — under
+        some timing, root.after()/root.destroy() calls from that thread never
+        actually fire, leaving a zombie process holding the single-instance
+        port open forever (every future launch then just sees "already
+        running" and does nothing). A watchdog timer guarantees the process
+        dies regardless of what the Tk main loop is doing.
+        """
+        threading.Timer(1.5, lambda: os._exit(0)).start()
+
         try:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=PROJECT_ROOT)
-        except Exception as exc:
-            messagebox.showerror("오류", f"GUI 재시작 실패: {exc}")
-        self.root.destroy()
-        sys.exit(0)
+            self.stop_server()
+        except Exception:
+            pass
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+        if self.lock_socket:
+            try:
+                self.lock_socket.close()
+            except Exception:
+                pass
+        if relaunch:
+            try:
+                subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=PROJECT_ROOT)
+            except Exception:
+                pass
+        try:
+            self.root.after(0, self.root.destroy)
+        except Exception:
+            pass
 
     def run(self):
         self.root.mainloop()
