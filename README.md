@@ -27,13 +27,18 @@ chmod +x install-mac.sh
 ./install-mac.sh
 ```
 
-**Windows (PowerShell):**
-```powershell
+**Windows:**
+```bash
 git clone <this-repo-url>
 cd vertex-openai-proxy
+```
+Then just double-click **`install-windows.bat`** in File Explorer (it launches the PowerShell installer for you, bypassing execution-policy prompts).
+
+Or run it from PowerShell directly:
+```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
-> If Node.js or the Google Cloud CLI had to be installed, the script will ask you to close the window and re-run it once in a fresh terminal so the new `PATH` is picked up.
+> If Node.js or the Google Cloud CLI had to be installed, the script will ask you to close the window and re-run it once (double-click the `.bat` again) in a fresh terminal so the new `PATH` is picked up.
 
 ### Manual setup
 
