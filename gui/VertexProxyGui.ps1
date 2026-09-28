@@ -571,9 +571,16 @@ function Start-NodeServer {
         return
     }
 
-    Remove-Item -LiteralPath $script:StdoutPath, $script:StderrPath -ErrorAction SilentlyContinue
-    New-Item -ItemType File -Path $script:StdoutPath -Force | Out-Null
-    New-Item -ItemType File -Path $script:StderrPath -Force | Out-Null
+    # Start-Process's own -RedirectStandardOutput/-RedirectStandardError
+    # (below) already truncates/recreates these files when it opens them,
+    # so no pre-deletion is needed. It used to happen here too, via
+    # Remove-Item + New-Item -Force — but right after Stop-NodeServer kills
+    # the previous node process (e.g. on Restart), Windows can take a brief
+    # moment to fully release its handle on this same file, and New-Item
+    # -Force has no -ErrorAction guard, so that race would throw a
+    # terminating "file in use" error straight out of $ErrorActionPreference
+    # = Stop and take the whole GUI down with it. Just reset the offsets;
+    # let Start-Process own file creation entirely.
     $script:StdoutOffset = 0
     $script:StderrOffset = 0
 
