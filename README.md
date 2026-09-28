@@ -15,6 +15,28 @@ This project was inspired by an earlier open-source Vertex-to-OpenAI proxy conce
 
 ## ⚙️ Installation
 
+### One-command setup (recommended)
+
+Clone the repo, then run the installer for your OS. It installs Node.js/gcloud if missing, runs `gcloud auth application-default login`, writes `.env` interactively, grants the `roles/aiplatform.user` IAM role, enables the Vertex AI API, and installs npm dependencies.
+
+**macOS:**
+```bash
+git clone <this-repo-url>
+cd vertex-openai-proxy
+chmod +x install-mac.sh
+./install-mac.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone <this-repo-url>
+cd vertex-openai-proxy
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
+```
+> If Node.js or the Google Cloud CLI had to be installed, the script will ask you to close the window and re-run it once in a fresh terminal so the new `PATH` is picked up.
+
+### Manual setup
+
 1. Clone the repository and install dependencies:
 ```bash
 git clone <this-repo-url>
