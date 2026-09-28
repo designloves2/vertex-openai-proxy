@@ -140,6 +140,77 @@ class RoundedButton(tk.Canvas):
         self.command_enabled = enabled
 
 
+def _round_rect_points(x1, y1, x2, y2, r):
+    return [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+        x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
+
+
+class RoundedEntry(tk.Canvas):
+    """A flat, rounded-corner text entry: a rounded rect drawn on a Canvas
+    with a borderless tk.Entry inset on top of it (same fill color, so the
+    entry blends in and only the canvas corners show as rounded)."""
+
+    def __init__(self, parent, width=300, height=36, radius=14, bg=BLACK, fg=WHITE, font_size=10):
+        super().__init__(parent, width=width, height=height, bg=parent["bg"], highlightthickness=0, bd=0)
+        self.create_polygon(_round_rect_points(2, 2, width - 2, height - 2, radius),
+                             smooth=True, fill=bg, outline=bg)
+        self.entry = tk.Entry(self, bg=bg, fg=fg, insertbackground=fg, relief="flat",
+                               bd=0, highlightthickness=0, font=(FONT_NAME, font_size))
+        inner_width = max(width - radius * 2, 10)
+        self.create_window(radius, height // 2, window=self.entry, anchor="w",
+                            width=inner_width, height=height - 12)
+
+    def get(self):
+        return self.entry.get()
+
+    def insert(self, index, text):
+        return self.entry.insert(index, text)
+
+    def delete(self, first, last=None):
+        return self.entry.delete(first, last)
+
+
+class RoundedCombo(tk.Canvas):
+    """Same rounded-rect trick as RoundedEntry, hosting a ttk.Combobox."""
+
+    _style_ready = False
+
+    def __init__(self, parent, values, width=300, height=36, radius=14, bg=BLACK, fg=WHITE, font_size=10):
+        super().__init__(parent, width=width, height=height, bg=parent["bg"], highlightthickness=0, bd=0)
+        self.create_polygon(_round_rect_points(2, 2, width - 2, height - 2, radius),
+                             smooth=True, fill=bg, outline=bg)
+
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("Rounded.TCombobox", fieldbackground=bg, background=bg,
+                         foreground=fg, arrowcolor=fg, borderwidth=0, relief="flat")
+        style.map("Rounded.TCombobox", fieldbackground=[("readonly", bg)])
+        root = parent.winfo_toplevel()
+        root.option_add("*TCombobox*Listbox.background", bg)
+        root.option_add("*TCombobox*Listbox.foreground", fg)
+        root.option_add("*TCombobox*Listbox.selectBackground", BLACK_HOVER)
+        root.option_add("*TCombobox*Listbox.selectForeground", fg)
+
+        self.combo = ttk.Combobox(self, values=values, style="Rounded.TCombobox", font=(FONT_NAME, font_size))
+        inner_width = max(width - radius * 2, 10)
+        self.create_window(radius, height // 2, window=self.combo, anchor="w",
+                            width=inner_width, height=height - 12)
+
+    def get(self):
+        return self.combo.get()
+
+    def set(self, value):
+        return self.combo.set(value)
+
+    def set_values(self, values):
+        self.combo["values"] = values
+
+
 # ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
@@ -148,8 +219,8 @@ class ProxyGuiApp:
         self.root = tk.Tk()
         self.root.title("Vertex OpenAI Proxy")
         self.root.configure(bg=BEIGE)
-        self.root.geometry("620x560")
-        self.root.minsize(560, 480)
+        self.root.geometry("760x620")
+        self.root.minsize(720, 480)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         self.root.bind("<Unmap>", self._on_unmap)
 
@@ -200,39 +271,47 @@ class ProxyGuiApp:
                               bg=BEIGE, fg="#5A4E42", font=(FONT_NAME, 8))
         tray_hint.pack(anchor="w", padx=16, pady=(0, 8))
 
-        log_frame = tk.Frame(self.root, bg=BLACK)
-        log_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        self.log_text = tk.Text(log_frame, bg=BLACK, fg=WHITE, insertbackground=WHITE,
+        # -- log (collapsible / accordion) --
+        log_header = tk.Frame(self.root, bg=BEIGE)
+        log_header.pack(fill="x", padx=16)
+        self.log_toggle_label = tk.Label(log_header, text="▼  로그", bg=BEIGE, fg=BLACK,
+                                          font=(FONT_NAME, 9, "bold"), cursor="hand2")
+        self.log_toggle_label.pack(side="left")
+        self.log_toggle_label.bind("<Button-1>", lambda e: self._toggle_log())
+
+        self.log_visible = True
+        self.log_frame = tk.Frame(self.root, bg=BLACK)
+        self.log_frame.pack(fill="both", expand=True, padx=16, pady=(4, 16))
+        self.log_text = tk.Text(self.log_frame, bg=BLACK, fg=WHITE, insertbackground=WHITE,
                                  relief="flat", bd=0, font=("Consolas", 9), wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=1, pady=1)
         self.log_text.configure(state="disabled")
 
+    def _toggle_log(self):
+        self.log_visible = not self.log_visible
+        if self.log_visible:
+            self.log_frame.pack(fill="both", expand=True, padx=16, pady=(4, 16))
+            self.log_toggle_label.configure(text="▼  로그")
+        else:
+            self.log_frame.pack_forget()
+            self.log_toggle_label.configure(text="▶  로그")
+
     def _add_field(self, parent, label_text):
         row = tk.Frame(parent, bg=BEIGE)
         row.pack(fill="x", pady=4)
-        tk.Label(row, text=label_text, bg=BEIGE, fg=BLACK, font=(FONT_NAME, 9, "bold"), width=18, anchor="w").pack(side="left")
-        entry = tk.Entry(row, bg=BLACK, fg=WHITE, insertbackground=WHITE, relief="flat", font=(FONT_NAME, 10))
-        entry.pack(side="left", fill="x", expand=True, ipady=4)
+        tk.Label(row, text=label_text, bg=BEIGE, fg=BLACK, font=(FONT_NAME, 9, "bold"),
+                 width=24, anchor="w").pack(side="left")
+        entry = RoundedEntry(row, width=440, height=36)
+        entry.pack(side="left")
         return entry
 
     def _add_model_field(self, parent, label_text):
         row = tk.Frame(parent, bg=BEIGE)
         row.pack(fill="x", pady=4)
-        tk.Label(row, text=label_text, bg=BEIGE, fg=BLACK, font=(FONT_NAME, 9, "bold"), width=18, anchor="w").pack(side="left")
-
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure("Dark.TCombobox", fieldbackground=BLACK, background=BLACK,
-                         foreground=WHITE, arrowcolor=WHITE)
-        self.root.option_add("*TCombobox*Listbox.background", BLACK)
-        self.root.option_add("*TCombobox*Listbox.foreground", WHITE)
-        self.root.option_add("*TCombobox*Listbox.selectBackground", BLACK_HOVER)
-
-        combo = ttk.Combobox(row, values=FALLBACK_MODELS, style="Dark.TCombobox", font=(FONT_NAME, 10))
-        combo.pack(side="left", fill="x", expand=True, ipady=2)
+        tk.Label(row, text=label_text, bg=BEIGE, fg=BLACK, font=(FONT_NAME, 9, "bold"),
+                 width=24, anchor="w").pack(side="left")
+        combo = RoundedCombo(row, values=FALLBACK_MODELS, width=440, height=36)
+        combo.pack(side="left")
         return combo
 
     # -- env <-> fields ------------------------------------------------------
@@ -248,7 +327,7 @@ class ProxyGuiApp:
 
         live_models = fetch_live_models(values["PORT"])
         merged = list(dict.fromkeys(live_models + FALLBACK_MODELS))
-        self.combo_model["values"] = merged
+        self.combo_model.set_values(merged)
 
     def _fields_to_env(self):
         return {
