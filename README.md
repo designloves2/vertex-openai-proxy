@@ -1,78 +1,81 @@
 # Vertex AI to OpenAI Local Proxy
 
-A lightning-fast, production-grade local proxy that translates OpenAI API requests into Google Vertex AI (Gemini) API requests. 
+A local proxy that translates OpenAI-format API requests (`/v1/chat/completions`, `/v1/responses`) into Google Vertex AI (Gemini) API requests, so OpenAI-compatible tools and coding agents can talk to Gemini models on Vertex AI.
 
-**🚀 THE $300 FREE CREDIT LIFEHACK:** 
-Google Cloud gives **$300 in free credits** to new users to use on Vertex AI, which gives you access to the bleeding-edge `Gemini 3.1 Pro (Thinking)` model. However, premium AI Coding Agents in VS Code (like Kilo Code, Cline, Cursor, or Roo) don't natively support Vertex AI's complex authentication and tool-calling schemas. 
+This fork fixes several issues in the original release that caused authentication failures, wrong model routing, broken streaming, and multi-turn tool-calling errors on Gemini 3.x. See `CHANGELOG.md` for the full list of fixes.
 
-This proxy solves that completely. It sits on your local machine, accepts OpenAI-format API calls from your VS Code extensions, translates them to Google's Vertex format securely, and streams the results back. **This allows you to code with the most expensive, advanced AI models used by senior devs, entirely for free using Google's startup credits.**
-
-Built by [TechBedouin](https://youtube.com/@TechBedouin).
-
-## 🌟 Why this proxy?
-
-Google's Vertex AI provides Enterprise-grade access to the powerful **Gemini 3.1 Pro** model. However, almost all local AI extensions expect to talk to an standard OpenAI API (`/v1/chat/completions`).
-
-This proxy sits on your local machine, accepts OpenAI-format API calls from your extensions, translates them to Google's Vertex format in real-time, and perfectly streams the results back.
-
-### 🔥 Features
-- **Full OpenAI API Compatibility:** Drop-in replacement for OpenAI endpoints (`/v1/chat/completions`).
-- **Memory-Bridged Tool Calling:** Gemini 3.1 Pro strictly requires cryptographically signed `thought_signature` metadata for multi-turn tool calling. This proxy uses an internal LRU Cache to persist these signatures across REST boundaries, ensuring your Agent doesn't crash mid-task.
-- **"God Mode" Local Vision Bypass:** Automatically detects `@filename.png` references in prompts, fetching images straight from your hard drive and encoding them silently to bypass API Base64 chunking limitations.
-- **Self-Healing Authentication:** Built-in OAuth 2.0 flow. Run one command to authenticate via browser. The proxy automatically refreshes tokens in the background to ensure sessions never randomly die.
+## 🔥 Features
+- **OpenAI API Compatibility:** Supports `/v1/chat/completions` and `/v1/responses`, both streaming and non-streaming.
+- **Google ADC Authentication:** Uses `google-auth-library`'s `GoogleAuth` with Application Default Credentials — no OAuth client ID/secret needed. Authenticate once with `gcloud auth application-default login`.
+- **Dynamic Model Routing:** The model requested by the client (e.g. `gemini-3-flash`, `gemini-3.1-pro`) is passed through to Vertex AI instead of being overridden by a fixed `.env` value.
+- **Gemini 3.x Flash Tuning:** Detects Gemini 3 Flash models and configures `thinkingConfig` (`thinkingLevel: "high"`) appropriately instead of forcing generic temperature/topP/topK defaults.
+- **Robust SSE Streaming Parser:** Rewritten to buffer partial chunks and only parse complete `data:` lines, fixing `Could not parse SSE event` errors seen with the original parser.
+- **Multi-turn Function Calling for Gemini 3:** Captures and restores the `thought_signature` required by Gemini 3 across tool-call turns using an LRU cache, fixing `Function call is missing a thought_signature (400)` errors.
+- **Multimodal Input:** Accepts images as data URIs or fetchable `http(s)` URLs and converts them to Gemini's `inlineData` format.
 
 ## ⚙️ Installation
 
-1. Clone the repository and install dependencies
+1. Clone the repository and install dependencies:
 ```bash
-git clone https://github.com/YourName/vertex-openai-proxy.git
+git clone <this-repo-url>
 cd vertex-openai-proxy
 npm install
 ```
 
-2. Configure your Environment Variables by creating a `.env` file:
+2. Configure your environment variables by creating a `.env` file:
 ```env
-# Required Configuration
+# Required
 GOOGLE_CLOUD_PROJECT_ID=your-gcp-project-id
 GOOGLE_CLOUD_LOCATION=global
-GOOGLE_CLOUD_MODEL_ID=gemini-3.1-pro-preview
+GOOGLE_CLOUD_MODEL_ID=gemini-1.5-flash-002
 
-# Optional (Auth Defaults)
-GOOGLE_CLIENT_ID=your-oauth-client-id
-GOOGLE_CLIENT_SECRET=your-oauth-client-secret
+# Optional
+PORT=3000
 ```
 
-3. Authenticate with Google Cloud:
+3. Authenticate with Google Cloud using Application Default Credentials:
 ```bash
-npm run auth
+gcloud auth application-default login
 ```
-This will open your browser. Accept the permissions, and your credentials will be securely saved to your local Application Default Credentials (ADC) path.
+Make sure your account has the `roles/aiplatform.user` role on the target project:
+```bash
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member="user:YOUR_EMAIL@gmail.com" \
+  --role="roles/aiplatform.user"
+```
 
 4. Start the server:
 ```bash
 npm run start
 ```
-*The proxy will now be listening on `http://localhost:3000`*
+The proxy listens on `http://localhost:3000` by default (override with `PORT`).
+
+> Note: the repo also ships a legacy `auth.js` (`npm run auth`) that performs an OAuth client-credential flow. It is kept for reference but is not required — `gcloud auth application-default login` is the supported authentication path.
 
 ## 🤖 Configuring your AI Agents
 
-Once the proxy is running, configure your VS Code Extension or AI tool exactly as if it were OpenAI:
+Point any OpenAI-compatible client at the proxy:
 
 *   **API Provider:** `OpenAI Compatible`
 *   **Base URL:** `http://localhost:3000/v1`
-*   **API Key:** `sk-anything` (The proxy ignores this; it uses your local OAuth token).
-*   **Model Name:** `gemini-3.1-pro-preview` 
+*   **API Key:** `sk-anything` (ignored by the proxy; it uses your local Google ADC credentials)
+*   **Model Name:** whatever Gemini model you want to call, e.g. `gemini-3.1-pro`, `gemini-3-flash`, `gemini-1.5-flash-002`
 
 ### Supported Agents
-This proxy is heavily tested and natively supports:
-- **Kilo Code**
-- **Cline & Roo Code**
-- **Aider**
-- **Any OpenAI-compatible library (Langchain, LlamaIndex, etc.)**
+Tested with OpenAI-compatible clients such as:
+- Kilo Code
+- Cline & Roo Code
+- Any OpenAI-compatible library (LangChain, LlamaIndex, etc.)
 
 ## 🏗️ Architecture
 
-1. **Request Interceptor:** Captures OpenAI format messages, extracting system prompts, user turns, and tool messages.
-2. **Vision Normalizer:** Downloads `http` images or fetches local disk images and packages them into Google's `inlineData` Base64 requirements.
-3. **SSE Stream Mapper:** Opens an HTTP connection to `aiplatform.googleapis.com`. As tokens stream back, it maps Vertex's nested candidate payload into OpenAI chunk events (`response.added`, `delta`, `done`).
-4. **Auth Watchdog:** Detects `401 Unauthorized` responses and instantly deletes local memory, forcing the very next request to perform a silent background refresh using your `refresh_token`.
+1. **Request Interceptor:** Parses OpenAI-format messages (system/user/assistant/tool turns).
+2. **Model Router:** `resolveVertexModel()` maps the client-requested model name to the Vertex model ID, applying aliases only when needed.
+3. **Multimodal Normalizer:** Converts data-URI and `http(s)` images into Gemini's `inlineData` Base64 parts.
+4. **SSE Stream Mapper:** Opens a streaming connection to `aiplatform.googleapis.com`, buffers partial `data:` chunks, and maps Vertex's candidate payloads into OpenAI-style stream events.
+5. **Tool Call / `thought_signature` Cache:** An LRU cache persists `call_id → { name, signature }` so Gemini 3's `thought_signature` survives across turns and tool responses are matched back to the correct function name.
+6. **Auth Handling:** Detects `401 Unauthorized` and instructs you to re-run `gcloud auth application-default login`.
+
+## 📄 Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md) for a detailed breakdown of what was fixed compared to the original release.
