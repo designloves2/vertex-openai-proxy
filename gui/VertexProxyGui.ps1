@@ -19,26 +19,22 @@
 
 $ErrorActionPreference = "Stop"
 
-Add-Type -AssemblyName PresentationFramework
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
+# ---------------------------------------------------------------------------
+# Error handling MUST come first, before anything that could fail (including
+# Add-Type). If a real problem (e.g. a mistyped path) previously slipped
+# through before this was wired up, the script would die instantly with zero
+# visible output under -WindowStyle Hidden — indistinguishable from "nothing
+# happens". This block only needs Split-Path/Join-Path (always available)
+# and System.Windows.Forms (present on every Windows install, unlike WPF's
+# PresentationFramework which is loaded further below and could in principle
+# fail on a stripped-down Windows) so it can report a failure at ANY point.
+# ---------------------------------------------------------------------------
 $ScriptDir = Split-Path -Parent $PSCommandPath
 $ProjectRoot = Split-Path -Parent $ScriptDir
 $EnvPath = Join-Path $ProjectRoot ".env"
 $CrashLogPath = Join-Path $ScriptDir "crash.log"
 $LockPidPath = Join-Path $ProjectRoot ".gui-instance.lock"
 $MutexName = "Global\VertexOpenAIProxyGuiMutex"
-
-$FallbackModels = @(
-    "gemini-3.7-flash",
-    "gemini-3.1-pro",
-    "gemini-3.8-flash",
-    "gemini-1.5-pro-002",
-    "gemini-1.5-flash-002"
-)
 
 function Write-CrashLog {
     param($ErrorRecord)
@@ -48,15 +44,38 @@ function Write-CrashLog {
     } catch {}
 }
 
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+} catch {
+    # Can't even show a MessageBox at this point; the .bat's own output
+    # redirection (2> launch-stderr.log) is the only thing that can surface
+    # this. Re-throw so PowerShell's own error text still goes to stderr.
+    throw
+}
+
 trap {
     Write-CrashLog $_
     try {
-        [System.Windows.MessageBox]::Show(
+        [System.Windows.Forms.MessageBox]::Show(
             "오류가 발생했습니다.`n$($_.Exception.Message)`n`n자세한 내용: $CrashLogPath",
-            "Vertex OpenAI Proxy", "OK", "Error") | Out-Null
+            "Vertex OpenAI Proxy", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     } catch {}
     exit 1
 }
+
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName System.Drawing
+
+$FallbackModels = @(
+    "gemini-3.7-flash",
+    "gemini-3.1-pro",
+    "gemini-3.8-flash",
+    "gemini-1.5-pro-002",
+    "gemini-1.5-flash-002"
+)
 
 # ---------------------------------------------------------------------------
 # Single-instance guard

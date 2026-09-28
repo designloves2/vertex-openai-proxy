@@ -198,7 +198,10 @@ $guiRunBatContent = @"
 @echo off
 REM Double-click this file to open the Vertex OpenAI Proxy GUI control panel.
 cd /d "%~dp0"
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0gui\VertexProxyGui.ps1"
+REM Redirect stdout/stderr to files so ANY failure is captured somewhere —
+REM including a PowerShell parse error, which happens before the script's
+REM own crash-logging code ever gets a chance to run.
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0gui\VertexProxyGui.ps1" 1> "%~dp0gui\launch-stdout.log" 2> "%~dp0gui\launch-stderr.log"
 "@
 Set-Content -Path $guiRunBatPath -Value $guiRunBatContent -Encoding ASCII
 Write-Host "생성됨: $guiRunBatPath (GUI 제어판용, Python 불필요 — PowerShell/WPF만 사용)"
@@ -215,9 +218,11 @@ Write-Host "  vertex-openai-proxy-GUI-run.bat  -> GUI 제어판"
 Write-Host ""
 $StartNow = Read-Host "지금 GUI 제어판을 열까요? (y/N)"
 if ($StartNow -match '^[Yy]') {
+    $guiDir = Join-Path $PSScriptRoot "gui"
     Start-Process -FilePath "powershell.exe" -ArgumentList @(
         "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$guiScriptPath`""
-    )
+    ) -RedirectStandardOutput (Join-Path $guiDir "launch-stdout.log") `
+      -RedirectStandardError (Join-Path $guiDir "launch-stderr.log")
 } else {
     Write-Host "나중에 시작하려면 위 두 파일 중 하나를 더블클릭하세요."
 }
