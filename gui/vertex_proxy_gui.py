@@ -385,8 +385,8 @@ def main(lock_socket):
         index_path,
         js_api=api,
         width=760,
-        height=640,
-        min_size=(680, 420),
+        height=720,
+        min_size=(680, 480),
         background_color="#F1E3D3",
     )
     api.window = window
@@ -397,7 +397,17 @@ def main(lock_socket):
 
     window.events.closing += on_closing
 
-    webview.start(debug=False)
+    # Force the modern Edge/Chromium engine on Windows instead of letting
+    # pywebview silently fall back to the ancient MSHTML (Trident/IE) engine
+    # if pythonnet/WebView2 aren't wired up correctly. MSHTML can still paint
+    # basic HTML/CSS (so the window *looks* fine) but doesn't support the
+    # modern JS this page uses (async/await, arrow functions, template
+    # literals, Set, ...), so every script silently fails to run — matching
+    # "window renders once, then never responds to anything." Forcing the
+    # backend makes a real setup problem fail loudly (into crash.log)
+    # instead of freezing silently.
+    gui_backend = "edgechromium" if sys.platform == "win32" else None
+    webview.start(debug=False, gui=gui_backend)
 
 
 if __name__ == "__main__":

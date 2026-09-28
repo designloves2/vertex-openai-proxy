@@ -12,17 +12,29 @@
     --muted: #5a4e42;
     --green: #3b8f5c;
     --red: #b23b3b;
+
+    /* pastel button colors (dark text on all of them) */
+    --pastel-green: #b7e4c7;
+    --pastel-green-hover: #9fd6b3;
+    --pastel-pink: #f4a9a8;
+    --pastel-pink-hover: #ee8f8e;
+    --pastel-blue: #a9c7f4;
+    --pastel-blue-hover: #8fb5f0;
+    --pastel-yellow: #f7d794;
+    --pastel-yellow-hover: #f3c86e;
   }
   * { box-sizing: border-box; }
   html, body {
     margin: 0; padding: 0;
+    height: 100%;
     background: var(--beige);
     color: var(--black);
     font-family: "Segoe UI", -apple-system, sans-serif;
     -webkit-user-select: none;
     user-select: none;
+    overflow: hidden; /* the page itself never scrolls; only #logText does */
   }
-  body { padding: 22px 24px; }
+  body { padding: 18px 22px; }
 
   h1 {
     font-size: 21px;
@@ -38,19 +50,21 @@
   .field-row { display: flex; align-items: center; margin-bottom: 10px; gap: 8px; }
   .field-row label { width: 190px; font-weight: 700; font-size: 12px; flex-shrink: 0; }
 
-  input[type="text"], select {
-    background: var(--black);
-    color: var(--white);
+  input[type="text"], input[type="password"], select {
+    background: var(--white);
+    color: var(--black);
     border: none;
     border-radius: 14px;
     padding: 9px 14px;
     font-size: 13px;
     outline: none;
     flex: 1;
-    box-shadow: 0 2px 6px rgba(0,0,0,.18);
+    box-shadow: 0 2px 6px rgba(0,0,0,.12);
     transition: box-shadow .15s ease;
   }
-  input[type="text"]:focus, select:focus { box-shadow: 0 0 0 2px var(--muted); }
+  input[type="text"]:focus, input[type="password"]:focus, select:focus {
+    box-shadow: 0 0 0 2px var(--muted);
+  }
 
   select { -webkit-appearance: none; appearance: none; cursor: pointer; }
 
@@ -62,18 +76,31 @@
   }
   .icon-btn:hover { background: var(--black-hover); }
 
-  .btn-row { display: flex; gap: 10px; margin: 16px 0 12px 0; flex-wrap: wrap; }
+  .btn-row { display: flex; gap: 10px; margin: 16px 0 12px 0; }
   button.action {
-    background: var(--black); color: var(--white);
+    flex: 1 1 0;
+    min-width: 0;
+    color: var(--black);
     border: none; border-radius: 14px;
-    padding: 10px 18px; font-size: 13px; font-weight: 700;
+    padding: 11px 8px; font-size: 13px; font-weight: 700;
     cursor: pointer;
-    box-shadow: 0 3px 8px rgba(0,0,0,.22);
+    box-shadow: 0 3px 8px rgba(0,0,0,.16);
     transition: background .15s ease, transform .05s ease;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  button.action:hover { background: var(--black-hover); }
   button.action:active { transform: translateY(1px); }
-  button.action:disabled { background: #9a9a9a; cursor: default; box-shadow: none; }
+  button.action:disabled { background: #d8d0c4 !important; color: #8a8272; cursor: default; box-shadow: none; }
+
+  #btnStart { background: var(--pastel-green); }
+  #btnStart:hover:not(:disabled) { background: var(--pastel-green-hover); }
+  #btnStop { background: var(--pastel-pink); }
+  #btnStop:hover:not(:disabled) { background: var(--pastel-pink-hover); }
+  #btnRestart { background: var(--pastel-blue); }
+  #btnRestart:hover:not(:disabled) { background: var(--pastel-blue-hover); }
+  #btnSave { background: var(--pastel-yellow); }
+  #btnSave:hover:not(:disabled) { background: var(--pastel-yellow-hover); }
 
   .hint { font-size: 11px; color: var(--muted); margin-bottom: 12px; }
 
