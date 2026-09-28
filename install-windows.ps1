@@ -193,20 +193,20 @@ Write-Host "생성됨: $runBatPath (콘솔 실행용, 항상 동작하는 안전
 
 # GUI launcher — pure PowerShell + WPF (gui\VertexProxyGui.ps1), no Python,
 # no pip packages, no separate runtime: WPF ships with Windows itself.
+#
+# Launched via gui\LaunchHidden.vbs (WScript.Shell.Run), NOT
+# "powershell.exe -WindowStyle Hidden" directly: on Windows 11 with
+# "Windows Terminal" set as the default terminal app, that setting
+# intercepts any new console-subsystem process and force-opens it in a
+# visible Windows Terminal tab regardless of the requested window style.
+# WScript.Shell.Run isn't a console-hosted launch, so it bypasses that
+# entirely and the GUI opens with truly no window at all.
 $guiRunBatPath = Join-Path $PSScriptRoot "vertex-openai-proxy-GUI-run.bat"
 $guiRunBatContent = @"
 @echo off
 REM Double-click this file to open the Vertex OpenAI Proxy GUI control panel.
 cd /d "%~dp0"
-REM "start ""actualtitle"" /B cmd /c ..." detaches this from the calling cmd
-REM window, which then closes immediately instead of staying open for as
-REM long as the GUI runs (a plain synchronous call here would block this
-REM console until the GUI is closed). -Sta is required for WPF and the
-REM WinForms system tray icon (Shell_NotifyIcon is a COM/STA API) to work
-REM correctly. stdout/stderr are still redirected to files so any failure
-REM (including a PowerShell parse error, before the script's own
-REM crash-logging code ever gets a chance to run) is captured somewhere.
-start "Vertex OpenAI Proxy" /B cmd /c "powershell.exe -NoLogo -NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File ""%~dp0gui\VertexProxyGui.ps1"" 1> ""%~dp0gui\launch-stdout.log"" 2> ""%~dp0gui\launch-stderr.log"""
+wscript.exe "%~dp0gui\LaunchHidden.vbs"
 "@
 Set-Content -Path $guiRunBatPath -Value $guiRunBatContent -Encoding ASCII
 Write-Host "생성됨: $guiRunBatPath (GUI 제어판용, Python 불필요 — PowerShell/WPF만 사용)"
@@ -223,11 +223,8 @@ Write-Host "  vertex-openai-proxy-GUI-run.bat  -> GUI 제어판"
 Write-Host ""
 $StartNow = Read-Host "지금 GUI 제어판을 열까요? (y/N)"
 if ($StartNow -match '^[Yy]') {
-    $guiDir = Join-Path $PSScriptRoot "gui"
-    Start-Process -FilePath "powershell.exe" -ArgumentList @(
-        "-NoLogo", "-NoProfile", "-Sta", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$guiScriptPath`""
-    ) -RedirectStandardOutput (Join-Path $guiDir "launch-stdout.log") `
-      -RedirectStandardError (Join-Path $guiDir "launch-stderr.log")
+    $launchVbsPath = Join-Path $PSScriptRoot "gui\LaunchHidden.vbs"
+    Start-Process -FilePath "wscript.exe" -ArgumentList "`"$launchVbsPath`""
 } else {
     Write-Host "나중에 시작하려면 위 두 파일 중 하나를 더블클릭하세요."
 }

@@ -69,6 +69,25 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Drawing
 
+# Give this window its own taskbar identity. Without this, Windows groups
+# it under the generic "Windows PowerShell" taskbar icon (since that's the
+# actual hosting process) and its right-click jump list shows PowerShell's
+# own generic entries (Run as Administrator, ISE, ...) instead of anything
+# related to this app — confusing, and easy to mistake for a missing
+# system tray icon.
+try {
+    Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+public class VertexProxyAppId {
+    [DllImport("shell32.dll", SetLastError = true)]
+    public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+}
+"@
+    [void][VertexProxyAppId]::SetCurrentProcessExplicitAppUserModelID("VertexOpenAIProxy.GUI")
+} catch {
+    # Cosmetic only — never let this block startup.
+}
+
 $FallbackModels = @(
     "gemini-3.7-flash",
     "gemini-3.1-pro",
@@ -619,9 +638,13 @@ function Restart-FullApp {
     $notifyIcon.Dispose()
     try { $mutex.ReleaseMutex() } catch {}
     Remove-Item -LiteralPath $LockPidPath -ErrorAction SilentlyContinue
-    Start-Process -FilePath "powershell.exe" -ArgumentList @(
-        "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$PSCommandPath`""
-    ) -WorkingDirectory $ProjectRoot
+    # Relaunch via the VBS wrapper (WScript.Shell.Run), not
+    # "powershell.exe -WindowStyle Hidden" directly — on Windows 11 with
+    # Windows Terminal set as the default terminal app, that setting
+    # force-opens any new console-subsystem process in a visible tab
+    # regardless of the requested window style. See LaunchHidden.vbs.
+    $launchVbsPath = Join-Path $ScriptDir "LaunchHidden.vbs"
+    Start-Process -FilePath "wscript.exe" -ArgumentList "`"$launchVbsPath`"" -WorkingDirectory $ProjectRoot
     $script:ForceClose = $true
     $window.Close()
 }
