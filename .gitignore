@@ -14,6 +14,7 @@ node_modules/
 # Python (GUI control panel)
 __pycache__/
 *.pyc
+.gui-instance.lock
 
 # OS files
 .DS_Store

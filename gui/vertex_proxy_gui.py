@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.request
 from tkinter import messagebox
@@ -57,6 +58,7 @@ ENV_KEYS = ["GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_MO
 # Arbitrary local-only port used purely as a single-instance mutex: binding it
 # fails if another copy of this GUI is already running.
 SINGLE_INSTANCE_PORT = 47123
+LOCK_PID_PATH = os.path.join(PROJECT_ROOT, ".gui-instance.lock")
 
 
 def acquire_single_instance_lock():
@@ -68,6 +70,34 @@ def acquire_single_instance_lock():
     except OSError:
         s.close()
         return None
+
+
+def read_lock_pid():
+    try:
+        with open(LOCK_PID_PATH, "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def write_lock_pid():
+    try:
+        with open(LOCK_PID_PATH, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def kill_pid(pid):
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                            capture_output=True, timeout=5)
+        else:
+            os.kill(pid, 15)  # SIGTERM
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +519,11 @@ class ProxyGuiApp:
                 self.lock_socket.close()
             except Exception:
                 pass
+        if not relaunch:
+            try:
+                os.remove(LOCK_PID_PATH)
+            except Exception:
+                pass
         if relaunch:
             try:
                 subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=PROJECT_ROOT)
@@ -505,10 +540,44 @@ class ProxyGuiApp:
 
 if __name__ == "__main__":
     lock_socket = acquire_single_instance_lock()
+
     if lock_socket is None:
+        existing_pid = read_lock_pid()
+        pid_note = f" (PID {existing_pid})" if existing_pid else ""
+
         _root = tk.Tk()
         _root.withdraw()
-        messagebox.showinfo("Vertex OpenAI Proxy", "이미 실행 중입니다. 시스템 트레이를 확인하세요.")
+        proceed = messagebox.askyesno(
+            "Vertex OpenAI Proxy",
+            f"이미 실행 중인 인스턴스가 있습니다{pid_note}.\n\n"
+            "기존 실행을 종료하고 새로 열까요?\n\n"
+            "예 → 기존 실행 종료 후 열기\n"
+            "아니오 → 닫기",
+        )
         _root.destroy()
-        sys.exit(0)
+
+        if not proceed:
+            sys.exit(0)
+
+        if existing_pid:
+            kill_pid(existing_pid)
+
+        # Give the old process a moment to release the port, then retry.
+        for _ in range(20):
+            lock_socket = acquire_single_instance_lock()
+            if lock_socket:
+                break
+            time.sleep(0.25)
+
+        if lock_socket is None:
+            _root2 = tk.Tk()
+            _root2.withdraw()
+            messagebox.showerror(
+                "Vertex OpenAI Proxy",
+                "기존 실행 종료에 실패했습니다. 작업 관리자에서 직접 종료한 뒤 다시 실행해주세요.",
+            )
+            _root2.destroy()
+            sys.exit(1)
+
+    write_lock_pid()
     ProxyGuiApp(lock_socket=lock_socket).run()
