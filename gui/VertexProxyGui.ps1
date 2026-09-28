@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Vertex OpenAI Proxy control panel (pure PowerShell + WPF, no Python).
 .DESCRIPTION
@@ -57,7 +57,7 @@ trap {
     Write-CrashLog $_
     try {
         [System.Windows.Forms.MessageBox]::Show(
-            "오류가 발생했습니다.`n$($_.Exception.Message)`n`n자세한 내용: $CrashLogPath",
+            "An error occurred.`n$($_.Exception.Message)`n`nDetails: $CrashLogPath",
             "Vertex OpenAI Proxy", [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     } catch {}
@@ -90,7 +90,7 @@ if (-not $createdNew) {
     }
     $pidNote = if ($existingPid) { " (PID $existingPid)" } else { "" }
     $answer = [System.Windows.MessageBox]::Show(
-        "이미 실행 중인 인스턴스가 있습니다$pidNote.`n`n기존 실행을 종료하고 새로 열까요?",
+        "An instance is already running$pidNote.`n`nTerminate it and open a new one?",
         "Vertex OpenAI Proxy", "YesNo", "Question")
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { exit 0 }
     if ($existingPid) {
@@ -100,7 +100,7 @@ if (-not $createdNew) {
     $mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$createdNew)
     if (-not $createdNew) {
         [System.Windows.MessageBox]::Show(
-            "기존 실행 종료에 실패했습니다. 작업 관리자에서 직접 종료한 뒤 다시 실행해주세요.",
+            "Failed to terminate the existing instance. Please close it from Task Manager and try again.",
             "Vertex OpenAI Proxy", "OK", "Error") | Out-Null
         exit 1
     }
@@ -214,7 +214,7 @@ $xaml = @'
 
     <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
       <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#B23B3B" VerticalAlignment="Center"/>
-      <TextBlock x:Name="StatusText" Text="중지됨" FontWeight="Bold" FontSize="13" Foreground="#1A1A1A" Margin="8,0,0,0" VerticalAlignment="Center"/>
+      <TextBlock x:Name="StatusText" Text="Stopped" FontWeight="Bold" FontSize="13" Foreground="#1A1A1A" Margin="8,0,0,0" VerticalAlignment="Center"/>
     </StackPanel>
 
     <Grid Margin="0,0,0,10">
@@ -241,7 +241,7 @@ $xaml = @'
         <ColumnDefinition Width="190"/>
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
-      <TextBlock Text="리전 (Location)" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
+      <TextBlock Text="Location" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
       <Border Grid.Column="1" Background="White" CornerRadius="14" Height="36">
         <TextBox x:Name="LocationTextBox" Background="Transparent" BorderThickness="0"
                  Padding="12,0" VerticalContentAlignment="Center" FontSize="13"/>
@@ -253,7 +253,7 @@ $xaml = @'
         <ColumnDefinition Width="190"/>
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
-      <TextBlock Text="Gemini 모델" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
+      <TextBlock Text="Gemini Model" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
       <Border Grid.Column="1" Background="White" CornerRadius="14" Height="36">
         <ComboBox x:Name="ModelComboBox" IsEditable="True" Background="Transparent" BorderThickness="0"
                   FontSize="13" VerticalContentAlignment="Center" Padding="10,0"/>
@@ -265,7 +265,7 @@ $xaml = @'
         <ColumnDefinition Width="190"/>
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
-      <TextBlock Text="포트 (Port)" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
+      <TextBlock Text="Port" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
       <Border Grid.Column="1" Background="White" CornerRadius="14" Height="36">
         <TextBox x:Name="PortTextBox" Background="Transparent" BorderThickness="0"
                  Padding="12,0" VerticalContentAlignment="Center" FontSize="13"/>
@@ -273,16 +273,16 @@ $xaml = @'
     </Grid>
 
     <UniformGrid Rows="1" Columns="4" Margin="0,0,0,12">
-      <Button x:Name="StartButton" Content="시작" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#B7E4C7" Foreground="Black"/>
-      <Button x:Name="StopButton" Content="정지" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#F4A9A8" Foreground="Black"/>
-      <Button x:Name="RestartButton" Content="재시작" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#A9C7F4" Foreground="Black"/>
-      <Button x:Name="SaveButton" Content="저장 후 재시작" Style="{StaticResource PastelButton}" Background="#F7D794" Foreground="Black"/>
+      <Button x:Name="StartButton" Content="Start" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#B7E4C7" Foreground="Black"/>
+      <Button x:Name="StopButton" Content="Stop" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#F4A9A8" Foreground="Black"/>
+      <Button x:Name="RestartButton" Content="Restart" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#A9C7F4" Foreground="Black"/>
+      <Button x:Name="SaveButton" Content="Save &amp; Restart" Style="{StaticResource PastelButton}" Background="#F7D794" Foreground="Black"/>
     </UniformGrid>
 
-    <TextBlock Text="창을 닫으면 트레이로 최소화됩니다. 완전히 종료하려면 트레이 아이콘 메뉴를 사용하세요."
+    <TextBlock Text="Closing this window minimizes it to the system tray. Use the tray icon menu to quit completely."
                FontSize="10" Foreground="#5A4E42" Margin="0,0,0,12" TextWrapping="Wrap"/>
 
-    <TextBlock x:Name="LogToggleText" Text="&#9660;  로그" FontWeight="Bold" FontSize="11"
+    <TextBlock x:Name="LogToggleText" Text="&#9660;  Log" FontWeight="Bold" FontSize="11"
                Foreground="#1A1A1A" Cursor="Hand" Margin="0,0,0,8"/>
 
     <Border x:Name="LogPanel" Background="#1A1A1A" CornerRadius="16" Height="220">
@@ -339,10 +339,10 @@ function Set-Status {
     param([bool]$Running)
     if ($Running) {
         $StatusDot.Fill = ConvertTo-Brush "#3B8F5C"
-        $StatusText.Text = "실행 중"
+        $StatusText.Text = "Running"
     } else {
         $StatusDot.Fill = ConvertTo-Brush "#B23B3B"
-        $StatusText.Text = "중지됨"
+        $StatusText.Text = "Stopped"
     }
 }
 
@@ -375,10 +375,10 @@ $LogToggleText.Add_MouseLeftButtonUp({
     $script:LogVisible = -not $script:LogVisible
     if ($script:LogVisible) {
         $LogPanel.Visibility = "Visible"
-        $LogToggleText.Text = "$([char]0x25BC)  로그"
+        $LogToggleText.Text = "$([char]0x25BC)  Log"
     } else {
         $LogPanel.Visibility = "Collapsed"
-        $LogToggleText.Text = "$([char]0x25B6)  로그"
+        $LogToggleText.Text = "$([char]0x25B6)  Log"
     }
 })
 
@@ -426,28 +426,28 @@ function Sync-EnvIfChanged {
     $current = Read-EnvValues
     $formValues = Get-FormValues
     if ([string]::IsNullOrWhiteSpace($formValues.GOOGLE_CLOUD_PROJECT_ID)) {
-        [System.Windows.MessageBox]::Show("Project ID를 입력해주세요.", "확인 필요", "OK", "Warning") | Out-Null
+        [System.Windows.MessageBox]::Show("Please enter a Project ID.", "Required", "OK", "Warning") | Out-Null
         return $false
     }
     $changed = $false
     foreach ($k in $EnvKeys) { if ($current[$k] -ne $formValues[$k]) { $changed = $true } }
     if ($changed) {
         Write-EnvValues $formValues
-        Append-LogLine "변경된 설정을 감지해 .env에 저장했습니다."
+        Append-LogLine "Detected changed settings; saved to .env."
     }
     return $true
 }
 
 function Start-NodeServer {
     if ($script:NodeProcess -and -not $script:NodeProcess.HasExited) {
-        Append-LogLine "이미 실행 중입니다."
+        Append-LogLine "Already running."
         return
     }
     if (-not (Sync-EnvIfChanged)) { return }
 
     $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
     if (-not $nodeCmd) {
-        [System.Windows.MessageBox]::Show("node 실행 파일을 찾을 수 없습니다. Node.js가 설치되어 있는지 확인해주세요.", "오류", "OK", "Error") | Out-Null
+        [System.Windows.MessageBox]::Show("Could not find the node executable. Please make sure Node.js is installed.", "Error", "OK", "Error") | Out-Null
         return
     }
 
@@ -462,19 +462,19 @@ function Start-NodeServer {
             -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput $script:StdoutPath -RedirectStandardError $script:StderrPath
     } catch {
-        [System.Windows.MessageBox]::Show("서버 시작 실패: $($_.Exception.Message)", "오류", "OK", "Error") | Out-Null
+        [System.Windows.MessageBox]::Show("Failed to start server: $($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
         return
     }
 
     $script:NodeProcess = $proc
     $script:WasRunning = $true
     Set-Status $true
-    Append-LogLine "서버를 시작했습니다."
+    Append-LogLine "Server started."
 }
 
 function Stop-NodeServer {
     if (-not $script:NodeProcess -or $script:NodeProcess.HasExited) {
-        Append-LogLine "실행 중인 서버가 없습니다."
+        Append-LogLine "No server is running."
         Set-Status $false
         return
     }
@@ -484,7 +484,7 @@ function Stop-NodeServer {
     } catch {}
     $script:WasRunning = $false
     Set-Status $false
-    Append-LogLine "서버를 정지했습니다."
+    Append-LogLine "Server stopped."
 }
 
 function Restart-NodeServer {
@@ -523,7 +523,7 @@ $timer.Add_Tick({
     if ($script:WasRunning -and $script:NodeProcess -and $script:NodeProcess.HasExited) {
         $script:WasRunning = $false
         Set-Status $false
-        Append-LogLine "서버 프로세스가 종료되었습니다."
+        Append-LogLine "Server process exited."
     }
 })
 $timer.Start()
@@ -534,11 +534,11 @@ $RestartButton.Add_Click({ Restart-NodeServer })
 $SaveButton.Add_Click({
     $formValues = Get-FormValues
     if ([string]::IsNullOrWhiteSpace($formValues.GOOGLE_CLOUD_PROJECT_ID)) {
-        [System.Windows.MessageBox]::Show("Project ID를 입력해주세요.", "확인 필요", "OK", "Warning") | Out-Null
+        [System.Windows.MessageBox]::Show("Please enter a Project ID.", "Required", "OK", "Warning") | Out-Null
         return
     }
     Write-EnvValues $formValues
-    Append-LogLine ".env를 저장했습니다. 서버를 재시작합니다..."
+    Append-LogLine "Saved .env. Restarting server..."
     Restart-NodeServer
 })
 
@@ -551,10 +551,10 @@ $notifyIcon.Text = "Vertex OpenAI Proxy"
 $notifyIcon.Visible = $false
 
 $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
-$menuOpen = $contextMenu.Items.Add("열기")
-$menuRestartServer = $contextMenu.Items.Add("서버 재시작")
-$menuRestartApp = $contextMenu.Items.Add("GUI 재시작 (프로세스 재시작)")
-$menuQuit = $contextMenu.Items.Add("완전히 종료")
+$menuOpen = $contextMenu.Items.Add("Open")
+$menuRestartServer = $contextMenu.Items.Add("Restart Server")
+$menuRestartApp = $contextMenu.Items.Add("Restart GUI (relaunch process)")
+$menuQuit = $contextMenu.Items.Add("Quit")
 $notifyIcon.ContextMenuStrip = $contextMenu
 
 function Show-MainWindow {
