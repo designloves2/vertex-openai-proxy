@@ -218,13 +218,17 @@ if (-not $pythonwExePath) { $pythonwExePath = $pythonExePath }
 $runBatPath = Join-Path $PSScriptRoot "vertex-openai-proxy-run.bat"
 $runBatContent = @"
 @echo off
-REM Double-click this file to open the Vertex OpenAI Proxy control panel (no console window).
+REM Double-click this file to open the Vertex OpenAI Proxy control panel.
 cd /d "%~dp0"
+REM Make sure the GUI's Python packages are up to date before launching, so a
+REM future update to gui\requirements.txt (e.g. adding a new package) doesn't
+REM require re-running the full installer.
+"$pythonExePath" -m pip install --quiet -r "%~dp0gui\requirements.txt"
 start "" "$pythonwExePath" "%~dp0gui\vertex_proxy_gui.py"
 "@
 Set-Content -Path $runBatPath -Value $runBatContent -Encoding ASCII
 Write-Host "생성됨: $runBatPath"
-Write-Host "다음부터는 이 파일을 더블클릭하면 GUI 제어판이 열립니다 (콘솔창 없이 트레이로 최소화 가능)."
+Write-Host "다음부터는 이 파일을 더블클릭하면 GUI 제어판이 열립니다 (실행 전 필요한 Python 패키지를 자동으로 맞춰줍니다)."
 
 # ---------------------------------------------------------------------------
 # 9. 완료 및 GUI 실행
