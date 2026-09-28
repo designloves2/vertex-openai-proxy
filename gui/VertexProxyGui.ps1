@@ -34,6 +34,7 @@ $ProjectRoot = Split-Path -Parent $ScriptDir
 $EnvPath = Join-Path $ProjectRoot ".env"
 $CrashLogPath = Join-Path $ScriptDir "crash.log"
 $LockPidPath = Join-Path $ProjectRoot ".gui-instance.lock"
+$CommandFilePath = Join-Path $ScriptDir ".gui-command"
 $MutexName = "Global\VertexOpenAIProxyGuiMutex"
 
 function Write-CrashLog {
@@ -88,6 +89,39 @@ public class VertexProxyAppId {
     # Cosmetic only — never let this block startup.
 }
 
+# SetCurrentProcessExplicitAppUserModelID (above) only changes taskbar
+# *grouping* identity — it does NOT change what the right-click jump list
+# shows. Without this, Windows falls back to generic PowerShell entries
+# (Run as Administrator, ISE, ...) because that's still the literal hosting
+# executable. WPF's System.Windows.Shell.JumpList wraps the underlying
+# ICustomDestinationList COM API to register real, app-specific tasks.
+# Each task shells out to SendCommand.vbs (no visible window, unlike
+# invoking powershell.exe directly) which just writes a one-word command to
+# $CommandFilePath; the running instance's DispatcherTimer picks it up.
+try {
+    $sendCommandPath = Join-Path $ScriptDir "SendCommand.vbs"
+    $script:WpfApp = [System.Windows.Application]::Current
+    if (-not $script:WpfApp) { $script:WpfApp = New-Object System.Windows.Application }
+
+    $jumpList = New-Object System.Windows.Shell.JumpList
+    foreach ($t in @(
+        @{ Title = "Open"; Cmd = "open" },
+        @{ Title = "Restart Server"; Cmd = "restart" },
+        @{ Title = "Quit"; Cmd = "quit" }
+    )) {
+        $task = New-Object System.Windows.Shell.JumpTask
+        $task.Title = $t.Title
+        $task.ApplicationPath = "$env:WINDIR\System32\wscript.exe"
+        $task.Arguments = "`"$sendCommandPath`" $($t.Cmd)"
+        $task.CustomCategory = "Vertex OpenAI Proxy"
+        [void]$jumpList.JumpItems.Add($task)
+    }
+    [System.Windows.Shell.JumpList]::SetJumpList($script:WpfApp, $jumpList)
+    $jumpList.Apply()
+} catch {
+    # Cosmetic only — never let this block startup.
+}
+
 $FallbackModels = @(
     "gemini-3.7-flash",
     "gemini-3.1-pro",
@@ -103,6 +137,7 @@ $createdNew = $false
 $mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$createdNew)
 
 if (-not $createdNew) {
+    $mutex.Dispose()
     $existingPid = $null
     if (Test-Path -LiteralPath $LockPidPath) {
         try { $existingPid = [int]((Get-Content -LiteralPath $LockPidPath -Raw).Trim()) } catch {}
@@ -112,12 +147,41 @@ if (-not $createdNew) {
         "An instance is already running$pidNote.`n`nTerminate it and open a new one?",
         "Vertex OpenAI Proxy", "YesNo", "Question")
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { exit 0 }
-    if ($existingPid) {
-        try { Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue } catch {}
+
+    # Ask the existing instance to quit itself first (it releases the mutex
+    # cleanly via Quit-App) instead of immediately force-killing whatever
+    # PID happens to be in the lock file. That PID file can go stale — e.g.
+    # a prior instance that crashed without cleaning it up, or (on a
+    # long-running machine) plain PID reuse by an unrelated process — in
+    # which case Stop-Process kills the wrong thing while the real mutex
+    # holder survives, and every retry fails the same way.
+    try { [System.IO.File]::WriteAllText($CommandFilePath, "quit") } catch {}
+
+    # Each failed attempt below still opens a real handle to the named
+    # mutex. If it's never closed, THIS process ends up being the one
+    # keeping the kernel object alive — so every subsequent attempt reports
+    # "already exists" forever, even after the other instance is long gone.
+    # Dispose every non-owning handle immediately so only the real owner
+    # (if any) keeps it alive.
+    $acquired = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 250
+        $mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$createdNew)
+        if ($createdNew) { $acquired = $true; break }
+        $mutex.Dispose()
     }
-    Start-Sleep -Milliseconds 500
-    $mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$createdNew)
-    if (-not $createdNew) {
+
+    if (-not $acquired -and $existingPid) {
+        # Graceful quit didn't land in time (e.g. the running instance
+        # predates this command-file mechanism, or it's stuck) — fall back
+        # to a hard kill by PID as a last resort.
+        try { Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue } catch {}
+        Start-Sleep -Milliseconds 500
+        $mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$createdNew)
+        $acquired = $createdNew
+    }
+
+    if (-not $acquired) {
         [System.Windows.MessageBox]::Show(
             "Failed to terminate the existing instance. Please close it from Task Manager and try again.",
             "Vertex OpenAI Proxy", "OK", "Error") | Out-Null
@@ -573,6 +637,20 @@ $timer.Add_Tick({
         $script:WasRunning = $false
         Set-Status $false
         Append-LogLine "Server process exited."
+    }
+    # Taskbar Jump List tasks can't call back into this process directly, so
+    # they write a one-word command to $CommandFilePath (via SendCommand.vbs)
+    # instead; pick it up here on the same poll that already checks the
+    # server's log files.
+    if (Test-Path -LiteralPath $CommandFilePath) {
+        $cmd = $null
+        try { $cmd = (Get-Content -LiteralPath $CommandFilePath -Raw -ErrorAction Stop).Trim() } catch {}
+        Remove-Item -LiteralPath $CommandFilePath -ErrorAction SilentlyContinue
+        switch ($cmd) {
+            "open"    { Show-MainWindow }
+            "restart" { Restart-NodeServer }
+            "quit"    { Quit-App }
+        }
     }
 })
 $timer.Start()
