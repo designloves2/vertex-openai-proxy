@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     One-shot installer for vertex-openai-proxy on Windows.
 .DESCRIPTION
