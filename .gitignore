@@ -11,6 +11,10 @@
 # Node modules
 node_modules/
 
+# Python (GUI control panel)
+__pycache__/
+*.pyc
+
 # OS files
 .DS_Store
 Thumbs.db

@@ -43,7 +43,7 @@ function Refresh-Path {
 # ---------------------------------------------------------------------------
 # 1. winget 확인
 # ---------------------------------------------------------------------------
-Step "1/8 winget 확인"
+Step "1/9 winget 확인"
 if (-not (Test-Command "winget")) {
     Err "winget이 없습니다. Microsoft Store에서 'App Installer'를 설치한 뒤 다시 실행해주세요."
     exit 1
@@ -53,7 +53,7 @@ Write-Host "winget 확인됨"
 # ---------------------------------------------------------------------------
 # 2. Node.js
 # ---------------------------------------------------------------------------
-Step "2/8 Node.js 확인"
+Step "2/9 Node.js 확인"
 if (-not (Test-Command "node")) {
     Write-Host "Node.js가 설치되어 있지 않습니다. 설치를 진행합니다..."
     winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
@@ -69,7 +69,7 @@ Write-Host "Node.js 확인됨: $(node --version)"
 # ---------------------------------------------------------------------------
 # 3. Google Cloud CLI
 # ---------------------------------------------------------------------------
-Step "3/8 Google Cloud CLI(gcloud) 확인"
+Step "3/9 Google Cloud CLI(gcloud) 확인"
 if (-not (Test-Command "gcloud")) {
     Write-Host "gcloud가 설치되어 있지 않습니다. 설치를 진행합니다..."
     winget install --id Google.CloudSDK -e --source winget --accept-package-agreements --accept-source-agreements
@@ -83,9 +83,41 @@ if (-not (Test-Command "gcloud")) {
 Write-Host "gcloud 확인됨: $(gcloud --version | Select-Object -First 1)"
 
 # ---------------------------------------------------------------------------
-# 4. npm 의존성 설치
+# 4. Python (트레이 GUI 앱 실행용)
 # ---------------------------------------------------------------------------
-Step "4/8 npm 의존성 설치"
+Step "4/9 Python 확인 (GUI 제어판용)"
+$pythonCmd = $null
+foreach ($candidate in @("python", "py")) {
+    if (Test-Command $candidate) { $pythonCmd = $candidate; break }
+}
+if (-not $pythonCmd) {
+    Write-Host "Python이 설치되어 있지 않습니다. 설치를 진행합니다..."
+    winget install --id Python.Python.3.12 -e --source winget --accept-package-agreements --accept-source-agreements
+    Refresh-Path
+    foreach ($candidate in @("python", "py")) {
+        if (Test-Command $candidate) { $pythonCmd = $candidate; break }
+    }
+}
+if (-not $pythonCmd) {
+    Warn "Python 설치 후에도 이 창에서 인식되지 않습니다. 창을 닫고 새 PowerShell/명령 프롬프트를 열어 install-windows.bat을 다시 실행해주세요."
+    Read-Host "계속하려면 Enter를 누르세요"
+    exit 0
+}
+Write-Host "Python 확인됨: $(& $pythonCmd --version)"
+
+Write-Host "GUI 제어판용 Python 패키지(pystray, Pillow)를 설치합니다..."
+& $pythonCmd -m pip install --quiet --upgrade pip
+& $pythonCmd -m pip install --quiet -r (Join-Path $PSScriptRoot "gui\requirements.txt")
+if ($LASTEXITCODE -ne 0) {
+    Warn "GUI용 Python 패키지 설치에 실패했습니다. GUI 앱의 트레이 기능이 동작하지 않을 수 있습니다."
+} else {
+    Write-Host "Python 패키지 설치 완료."
+}
+
+# ---------------------------------------------------------------------------
+# 5. npm 의존성 설치
+# ---------------------------------------------------------------------------
+Step "5/9 npm 의존성 설치"
 npm install
 if ($LASTEXITCODE -ne 0) {
     Err "npm install에 실패했습니다. 위 오류 메시지를 확인해주세요."
@@ -94,9 +126,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
-# 5. .env 설정
+# 6. .env 설정
 # ---------------------------------------------------------------------------
-Step "5/8 .env 설정"
+Step "6/9 .env 설정"
 $envPath = Join-Path $PSScriptRoot ".env"
 if (Test-Path $envPath) {
     Write-Host ".env 파일이 이미 존재합니다. 기존 값을 유지합니다. (재설정하려면 .env를 삭제하고 다시 실행하세요)"
@@ -129,9 +161,9 @@ $envLines = Get-Content $envPath
 $ProjectIdValue = ($envLines | Where-Object { $_ -match '^GOOGLE_CLOUD_PROJECT_ID=' }) -replace '^GOOGLE_CLOUD_PROJECT_ID=', ''
 
 # ---------------------------------------------------------------------------
-# 6. Google 인증 (ADC)
+# 7. Google 인증 (ADC)
 # ---------------------------------------------------------------------------
-Step "6/8 Google Cloud 인증 (Application Default Credentials)"
+Step "7/9 Google Cloud 인증 (Application Default Credentials)"
 Write-Host "브라우저 창이 열립니다. Google 계정으로 로그인 후 권한을 승인해주세요."
 gcloud auth application-default login
 if ($LASTEXITCODE -ne 0) {
@@ -172,31 +204,37 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 # ---------------------------------------------------------------------------
-# 7. 실행용 배치 파일 생성
+# 8. 실행용 GUI 런처(.bat) 생성
 # ---------------------------------------------------------------------------
-Step "7/8 실행용 배치 파일 생성"
+Step "8/9 실행용 GUI 런처 생성"
+$pythonExePath = (Get-Command $pythonCmd -ErrorAction SilentlyContinue).Source
+$pythonwExePath = $null
+if ($pythonExePath) {
+    $candidatePythonw = Join-Path (Split-Path $pythonExePath) "pythonw.exe"
+    if (Test-Path $candidatePythonw) { $pythonwExePath = $candidatePythonw }
+}
+if (-not $pythonwExePath) { $pythonwExePath = $pythonExePath }
+
 $runBatPath = Join-Path $PSScriptRoot "vertex-openai-proxy-run.bat"
 $runBatContent = @"
 @echo off
-REM Double-click this file to start the vertex-openai-proxy server.
+REM Double-click this file to open the Vertex OpenAI Proxy control panel (no console window).
 cd /d "%~dp0"
-npm run start
-pause
+start "" "$pythonwExePath" "%~dp0gui\vertex_proxy_gui.py"
 "@
 Set-Content -Path $runBatPath -Value $runBatContent -Encoding ASCII
 Write-Host "생성됨: $runBatPath"
-Write-Host "다음부터는 이 파일을 더블클릭하면 서버가 시작됩니다."
+Write-Host "다음부터는 이 파일을 더블클릭하면 GUI 제어판이 열립니다 (콘솔창 없이 트레이로 최소화 가능)."
 
 # ---------------------------------------------------------------------------
-# 8. 완료 및 서버 실행
+# 9. 완료 및 GUI 실행
 # ---------------------------------------------------------------------------
-Step "8/8 설치 완료"
+Step "9/9 설치 완료"
 Write-Host "모든 준비가 끝났습니다!"
 Write-Host ""
-$StartNow = Read-Host "지금 서버를 시작할까요? (y/N)"
+$StartNow = Read-Host "지금 GUI 제어판을 열까요? (y/N)"
 if ($StartNow -match '^[Yy]') {
-    npm run start
+    Start-Process -FilePath $pythonwExePath -ArgumentList (Join-Path $PSScriptRoot "gui\vertex_proxy_gui.py")
 } else {
-    Write-Host "나중에 서버를 시작하려면 vertex-openai-proxy-run.bat 파일을 더블클릭하거나 다음 명령을 실행하세요:"
-    Write-Host "  npm run start"
+    Write-Host "나중에 시작하려면 vertex-openai-proxy-run.bat 파일을 더블클릭하세요."
 }
