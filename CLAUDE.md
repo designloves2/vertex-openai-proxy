@@ -1,19 +1,75 @@
 # Vertex OpenAI Proxy — GUI debugging history
 
-## Status: GUI is functional. Core flow verified end-to-end; tray/mutex need one manual click-through
+## Status: working, user-confirmed. One known real limitation (system tray)
 
-Everything below the "Status (previous)" heading is resolved and kept only
-as history/context for future changes. Remaining open items:
-- Tray icon's own context menu (Open / Restart Server / Restart GUI / Quit)
-  and the duplicate-instance-launch prompt haven't been re-verified after
-  the Node-PATH fix — they need real mouse clicks / a second real launch,
-  which wasn't safe to automate against the user's live desktop. Ask the
-  user to click through these once if it matters.
-- Separately, unrelated to the GUI: `index.js` had a literally-corrupted
-  byte sequence in a console.log string (`'  ?뮕 TIP: ...'` — garbled bytes
-  baked into the file itself, not a runtime encoding issue), replaced with
-  plain ASCII (`[TIP]`). Checked the rest of `index.js` for other non-UTF-8
-  byte sequences; none found.
+The user has confirmed the GUI works end-to-end in daily use: launches with
+no console window, Start/Stop/Restart/Save & Restart all work against a
+real node process, `.env` autosave works, field masking works, the log
+panel resizes with the window.
+
+### Known remaining issue: doesn't actually minimize to the system tray
+Closing the window (X) currently behaves like a normal minimize — it drops
+to a taskbar icon, not the system tray/notification area near the clock.
+The taskbar icon's own right-click Jump List (Open / Restart Server / Quit,
+via `SendCommand.vbs` + `.gui-command`) does work correctly, and the
+process does NOT die when the window "closes" (confirmed: it keeps running,
+right-click menu still functions) — so this is cosmetic/placement, not a
+process-lifetime bug. The user is fine using it via the taskbar icon for
+now; revisit `$notifyIcon` (`System.Windows.Forms.NotifyIcon`) if this
+becomes worth chasing further. Untested hypothesis, not yet investigated:
+mixing a WinForms `NotifyIcon` with a WPF-only message loop (`$window.ShowDialog()`,
+no `System.Windows.Forms.Application.Run()`) may need something extra for
+`Shell_NotifyIcon` to actually place the icon rather than just flip
+`.Visible`.
+
+### Fixed along the way (see git log for full detail per commit)
+- **Parse-time crash on launch**: `gui/VertexProxyGui.ps1` needed a UTF-8
+  BOM (Windows PowerShell 5.1 + non-ASCII text without one silently
+  misreads the file — see the very bottom of this doc for the full
+  writeup, kept as a reference for this recurring class of bug).
+- **"Start" silently did nothing**: no fallback when `node` wasn't on the
+  launching process's PATH (common after a winget/nvm install) — added
+  `Find-NodeExe`, plus made every failure path log to the GUI's own panel
+  instead of only a MessageBox.
+- **Visible console window / wrong taskbar identity**: switched to a VBS
+  launcher (`gui/LaunchHidden.vbs`, bypasses Windows 11's "open new
+  console apps in Windows Terminal" setting) and
+  `SetCurrentProcessExplicitAppUserModelID` + a real `System.Windows.Shell.JumpList`
+  for the taskbar right-click menu (`gui/SendCommand.vbs` relays Jump List
+  clicks back into the running instance via a `.gui-command` file the
+  existing `DispatcherTimer` poll picks up).
+- **Duplicate-instance handoff got permanently stuck**: the mutex retry
+  loop never disposed failed handles, so the *new* process ended up being
+  the one keeping the old mutex alive — fixed by disposing every
+  non-owning handle immediately, and by asking the existing instance to
+  quit gracefully (via the same `.gui-command` channel) before falling
+  back to `Stop-Process` by PID.
+- **Crash on Restart / Save & Restart**: `New-Item -Force` on the node
+  server's stdout/stderr log files raced with Windows still finishing
+  release of the just-killed process's file handle — removed the
+  redundant pre-creation entirely (`Start-Process -RedirectStandardOutput`
+  already truncates/creates the file itself).
+- **EADDRINUSE on Restart**: same class of race, for the TCP port instead
+  of a file handle — `Stop-NodeServer` now polls `Get-NetTCPConnection`
+  for the port to actually clear before `Start-NodeServer` tries to bind
+  it again, instead of a fixed 300ms guess.
+- **Log panel didn't grow when the window was resized**: root layout was
+  a `StackPanel` (every row sized to content); converted to a `Grid` with
+  the log panel's row as `Height="*"`.
+- **Wrong fallback model ID**: `gemini-3.1-pro` 404s against Vertex AI;
+  the real id (confirmed via AI Studio / Cloud Console) is
+  `gemini-3.1-pro-preview`.
+- A launcher log-file lock (no owning process visible, possibly AV/EDR
+  real-time scanning) could make the *entire app* fail to launch with zero
+  trace anywhere, because `cmd.exe`'s own `1> file` redirection has to
+  successfully open the target before it'll even start `powershell.exe`.
+  Fixed by giving each launch its own timestamped log filenames instead of
+  a fixed pair.
+
+Separately, unrelated to the GUI: `index.js` had a literally-corrupted
+byte sequence in a console.log string (`'  ?뮕 TIP: ...'` — garbled bytes
+baked into the file itself, not a runtime encoding issue), replaced with
+plain ASCII (`[TIP]`).
 
 ## Status: launch fixed and verified; Start/Stop/Restart now verified working end-to-end
 
