@@ -266,7 +266,7 @@ $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Vertex OpenAI Proxy"
-        Width="720" SizeToContent="Height"
+        Width="720" Height="700" MinWidth="560" MinHeight="480"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanResizeWithGrip"
         Background="#F1E3D3"
@@ -300,15 +300,28 @@ $xaml = @'
     </Style>
   </Window.Resources>
 
-  <StackPanel Margin="22">
-    <TextBlock Text="Vertex OpenAI Proxy" FontSize="21" FontWeight="Bold" Foreground="#1A1A1A" Margin="0,0,0,10"/>
+  <Grid x:Name="RootGrid" Margin="22">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+    </Grid.RowDefinitions>
 
-    <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
+    <TextBlock Grid.Row="0" Text="Vertex OpenAI Proxy" FontSize="21" FontWeight="Bold" Foreground="#1A1A1A" Margin="0,0,0,10"/>
+
+    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,18">
       <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#B23B3B" VerticalAlignment="Center"/>
       <TextBlock x:Name="StatusText" Text="Stopped" FontWeight="Bold" FontSize="13" Foreground="#1A1A1A" Margin="8,0,0,0" VerticalAlignment="Center"/>
     </StackPanel>
 
-    <Grid Margin="0,0,0,10">
+    <Grid Grid.Row="2" Margin="0,0,0,10">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="190"/>
         <ColumnDefinition Width="*"/>
@@ -327,7 +340,7 @@ $xaml = @'
               Style="{StaticResource PastelButton}" Background="White" Foreground="Black" FontSize="14"/>
     </Grid>
 
-    <Grid Margin="0,0,0,10">
+    <Grid Grid.Row="3" Margin="0,0,0,10">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="190"/>
         <ColumnDefinition Width="*"/>
@@ -339,7 +352,7 @@ $xaml = @'
       </Border>
     </Grid>
 
-    <Grid Margin="0,0,0,10">
+    <Grid Grid.Row="4" Margin="0,0,0,10">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="190"/>
         <ColumnDefinition Width="*"/>
@@ -351,7 +364,7 @@ $xaml = @'
       </Border>
     </Grid>
 
-    <Grid Margin="0,0,0,16">
+    <Grid Grid.Row="5" Margin="0,0,0,16">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="190"/>
         <ColumnDefinition Width="*"/>
@@ -363,32 +376,33 @@ $xaml = @'
       </Border>
     </Grid>
 
-    <UniformGrid Rows="1" Columns="4" Margin="0,0,0,12">
+    <UniformGrid Grid.Row="6" Rows="1" Columns="4" Margin="0,0,0,12">
       <Button x:Name="StartButton" Content="Start" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#B7E4C7" Foreground="Black"/>
       <Button x:Name="StopButton" Content="Stop" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#F4A9A8" Foreground="Black"/>
       <Button x:Name="RestartButton" Content="Restart" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#A9C7F4" Foreground="Black"/>
       <Button x:Name="SaveButton" Content="Save &amp; Restart" Style="{StaticResource PastelButton}" Background="#F7D794" Foreground="Black"/>
     </UniformGrid>
 
-    <TextBlock Text="Closing this window minimizes it to the system tray. Use the tray icon menu to quit completely."
+    <TextBlock Grid.Row="7" Text="Closing this window minimizes it to the system tray. Use the tray icon menu to quit completely."
                FontSize="10" Foreground="#5A4E42" Margin="0,0,0,12" TextWrapping="Wrap"/>
 
-    <TextBlock x:Name="LogToggleText" Text="&#9660;  Log" FontWeight="Bold" FontSize="11"
+    <TextBlock Grid.Row="8" x:Name="LogToggleText" Text="&#9660;  Log" FontWeight="Bold" FontSize="11"
                Foreground="#1A1A1A" Cursor="Hand" Margin="0,0,0,8"/>
 
-    <Border x:Name="LogPanel" Background="#1A1A1A" CornerRadius="16" Height="220">
+    <Border Grid.Row="9" x:Name="LogPanel" Background="#1A1A1A" CornerRadius="16" MinHeight="120">
       <TextBox x:Name="LogBox" Background="Transparent" Foreground="White" BorderThickness="0"
                FontFamily="Consolas" FontSize="11" Margin="14"
                TextWrapping="Wrap" AcceptsReturn="True" IsReadOnly="True"
                VerticalScrollBarVisibility="Auto"/>
     </Border>
-  </StackPanel>
+  </Grid>
 </Window>
 '@
 
 $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
+$RootGrid             = $window.FindName("RootGrid")
 $StatusDot            = $window.FindName("StatusDot")
 $StatusText           = $window.FindName("StatusText")
 $ProjectIdPasswordBox = $window.FindName("ProjectIdPasswordBox")
@@ -462,14 +476,21 @@ $ToggleMaskButton.Add_Click({
 })
 
 $script:LogVisible = $true
+$LogRowDefinition = $RootGrid.RowDefinitions[9]
 $LogToggleText.Add_MouseLeftButtonUp({
     $script:LogVisible = -not $script:LogVisible
     if ($script:LogVisible) {
         $LogPanel.Visibility = "Visible"
         $LogToggleText.Text = "$([char]0x25BC)  Log"
+        $LogRowDefinition.Height = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
     } else {
         $LogPanel.Visibility = "Collapsed"
         $LogToggleText.Text = "$([char]0x25B6)  Log"
+        # A "*" row keeps claiming its share of space even once its only
+        # child is Collapsed (star sizing isn't content-driven the way
+        # Auto is), which would leave a big dead gap below the buttons.
+        # Collapse the row itself while hidden.
+        $LogRowDefinition.Height = New-Object System.Windows.GridLength(0)
     }
 })
 
@@ -610,6 +631,18 @@ function Stop-NodeServer {
         $script:NodeProcess.Kill()
         $script:NodeProcess.WaitForExit(5000) | Out-Null
     } catch {}
+    # Killing the process doesn't guarantee Windows has released the TCP
+    # port it was listening on yet — a Restart that immediately tries to
+    # bind the same port can lose that race with EADDRINUSE. Poll instead
+    # of a fixed sleep so this doesn't wait any longer than it has to.
+    $portValue = $PortTextBox.Text.Trim()
+    if ($portValue) {
+        for ($i = 0; $i -lt 20; $i++) {
+            $stillBound = Get-NetTCPConnection -LocalPort $portValue -State Listen -ErrorAction SilentlyContinue
+            if (-not $stillBound) { break }
+            Start-Sleep -Milliseconds 150
+        }
+    }
     $script:WasRunning = $false
     Set-Status $false
     Append-LogLine "Server stopped."
