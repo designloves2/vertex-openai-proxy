@@ -29,11 +29,11 @@ Then just double-click **`install-windows.bat`** in File Explorer (it launches t
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
-> If Node.js, the Google Cloud CLI, or Python had to be installed, the installer refreshes `PATH` automatically and continues in the same window. If a tool still isn't picked up, it'll ask you to close the window and re-run once.
+> If Node.js or the Google Cloud CLI had to be installed, the installer refreshes `PATH` automatically and continues in the same window. If a tool still isn't picked up, it'll ask you to close the window and re-run once.
 
-The installer also sets up Python (used only for the GUI) and generates two launchers:
+The installer generates two launchers:
 - **`vertex-openai-proxy-run.bat`** — plain console window running `npm run start`. Always works; use this if the GUI ever gives you trouble.
-- **`vertex-openai-proxy-GUI-run.bat`** — opens the GUI control panel (no console window). Re-checks/installs its Python packages every time before launching, so a future dependency change doesn't require re-running the whole installer.
+- **`vertex-openai-proxy-GUI-run.bat`** — opens the GUI control panel (no console window). Pure PowerShell + WPF — no Python, no pip packages, no separate runtime to install, since WPF ships with Windows itself.
 
 **macOS:**
 ```bash
@@ -85,7 +85,7 @@ The proxy listens on `http://localhost:3000` by default (override with `PORT`).
 
 ## 🖥️ GUI control panel (Windows)
 
-Windows users get a small desktop app for managing the proxy, instead of a bare console window. The UI is plain HTML/CSS/JS (`gui/index.html`) rendered by the OS's native web view (WebView2); `gui/vertex_proxy_gui.py` is just the Python backend/bridge (server process control, `.env` read/write, system tray).
+Windows users get a small desktop app for managing the proxy, instead of a bare console window: `gui/VertexProxyGui.ps1`, pure PowerShell + WPF. No Python, no pip packages, no embedded browser engine — WPF is part of .NET and ships with every Windows install, so there's nothing extra to install or that can silently fail to initialize.
 
 ![Vertex OpenAI Proxy GUI](docs/screenshot-gui.png)
 
@@ -98,11 +98,10 @@ Windows users get a small desktop app for managing the proxy, instead of a bare 
 
 Launch it any time with `vertex-openai-proxy-GUI-run.bat`, or manually:
 ```powershell
-pythonw gui\vertex_proxy_gui.py
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File gui\VertexProxyGui.ps1
 ```
-Requires Python 3 + the packages in `gui/requirements.txt` (`pywebview`, `pythonnet` on Windows, `pystray`, `Pillow`) — installed automatically by `install-windows.ps1`, and re-checked every time `vertex-openai-proxy-GUI-run.bat` runs.
 
-If the GUI ever fails to start, check `gui/crash.log` (written on any unhandled error, since `pythonw.exe` has no console to show one) — or just use `vertex-openai-proxy-run.bat` instead, which runs the server directly with no GUI dependency at all.
+If the GUI ever fails to start, check `gui/crash.log` (written on any unhandled error) — or just use `vertex-openai-proxy-run.bat` instead, which runs the server directly with no GUI dependency at all.
 
 ## 🤖 Configuring your AI Agents
 

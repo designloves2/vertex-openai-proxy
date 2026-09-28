@@ -11,9 +11,7 @@
 # Node modules
 node_modules/
 
-# Python (GUI control panel)
-__pycache__/
-*.pyc
+# GUI control panel runtime files
 .gui-instance.lock
 gui/crash.log
 

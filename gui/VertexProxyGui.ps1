@@ -1,0 +1,599 @@
+<#
+.SYNOPSIS
+    Vertex OpenAI Proxy control panel (pure PowerShell + WPF, no Python).
+.DESCRIPTION
+    Starts/stops/restarts the Node.js proxy server, edits .env (project id,
+    location, model, port), and minimizes to the Windows system tray instead
+    of leaving a console window open.
+
+    Deliberately built on WPF (System.Windows / PresentationFramework) rather
+    than any Python GUI toolkit: WPF ships with every Windows install (it's
+    part of .NET, already used by install-windows.ps1 itself), so there is no
+    separate runtime/package to install, no version to mismatch, and nothing
+    that can silently fail to initialize the way a Python interpreter, pip
+    package, or embedded browser engine can.
+.NOTES
+    Run hidden (no console window):
+        powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File .\VertexProxyGui.ps1
+#>
+
+$ErrorActionPreference = "Stop"
+
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$ScriptDir = Split-Path -Parent $PSCommandPath
+$ProjectRoot = Split-Path -Parent $ScriptDir
+$EnvPath = Join-Path $ProjectRoot ".env"
+$CrashLogPath = Join-Path $ScriptDir "crash.log"
+$LockPidPath = Join-Path $ProjectRoot ".gui-instance.lock"
+$MutexName = "Global\VertexOpenAIProxyGuiMutex"
+
+$FallbackModels = @(
+    "gemini-3.7-flash",
+    "gemini-3.1-pro",
+    "gemini-3.8-flash",
+    "gemini-1.5-pro-002",
+    "gemini-1.5-flash-002"
+)
+
+function Write-CrashLog {
+    param($ErrorRecord)
+    try {
+        $text = "`n" + ("=" * 70) + "`n" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "`n" + ($ErrorRecord | Out-String)
+        Add-Content -LiteralPath $CrashLogPath -Value $text -Encoding UTF8
+    } catch {}
+}
+
+trap {
+    Write-CrashLog $_
+    try {
+        [System.Windows.MessageBox]::Show(
+            "오류가 발생했습니다.`n$($_.Exception.Message)`n`n자세한 내용: $CrashLogPath",
+            "Vertex OpenAI Proxy", "OK", "Error") | Out-Null
+    } catch {}
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Single-instance guard
+# ---------------------------------------------------------------------------
+$createdNew = $false
+$mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$createdNew)
+
+if (-not $createdNew) {
+    $existingPid = $null
+    if (Test-Path -LiteralPath $LockPidPath) {
+        try { $existingPid = [int]((Get-Content -LiteralPath $LockPidPath -Raw).Trim()) } catch {}
+    }
+    $pidNote = if ($existingPid) { " (PID $existingPid)" } else { "" }
+    $answer = [System.Windows.MessageBox]::Show(
+        "이미 실행 중인 인스턴스가 있습니다$pidNote.`n`n기존 실행을 종료하고 새로 열까요?",
+        "Vertex OpenAI Proxy", "YesNo", "Question")
+    if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { exit 0 }
+    if ($existingPid) {
+        try { Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue } catch {}
+    }
+    Start-Sleep -Milliseconds 500
+    $mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$createdNew)
+    if (-not $createdNew) {
+        [System.Windows.MessageBox]::Show(
+            "기존 실행 종료에 실패했습니다. 작업 관리자에서 직접 종료한 뒤 다시 실행해주세요.",
+            "Vertex OpenAI Proxy", "OK", "Error") | Out-Null
+        exit 1
+    }
+}
+Set-Content -LiteralPath $LockPidPath -Value $PID -Encoding UTF8
+
+# ---------------------------------------------------------------------------
+# .env helpers (only touch the keys we manage; leave everything else as-is)
+# ---------------------------------------------------------------------------
+$EnvKeys = @("GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_MODEL_ID", "PORT")
+
+function Read-EnvValues {
+    $values = [ordered]@{
+        GOOGLE_CLOUD_PROJECT_ID = ""
+        GOOGLE_CLOUD_LOCATION   = "global"
+        GOOGLE_CLOUD_MODEL_ID   = "gemini-3.7-flash"
+        PORT                    = "3000"
+    }
+    if (Test-Path -LiteralPath $EnvPath) {
+        foreach ($line in (Get-Content -LiteralPath $EnvPath -Encoding UTF8)) {
+            $trimmed = $line.Trim()
+            if (-not $trimmed -or $trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) { continue }
+            $idx = $trimmed.IndexOf("=")
+            $key = $trimmed.Substring(0, $idx).Trim()
+            $val = $trimmed.Substring($idx + 1).Trim()
+            if ($values.Contains($key)) { $values[$key] = $val }
+        }
+    }
+    return $values
+}
+
+function Write-EnvValues {
+    param([hashtable]$Values)
+    $outLines = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    if (Test-Path -LiteralPath $EnvPath) {
+        foreach ($line in (Get-Content -LiteralPath $EnvPath -Encoding UTF8)) {
+            $trimmed = $line.TrimEnd()
+            $key = $null
+            if ($trimmed.Contains("=")) { $key = $trimmed.Substring(0, $trimmed.IndexOf("=")).Trim() }
+            if ($EnvKeys -contains $key) {
+                if ($seen.ContainsKey($key)) { continue }  # drop duplicate/stale lines
+                $outLines.Add("$key=$($Values[$key])")
+                $seen[$key] = $true
+            } else {
+                $outLines.Add($trimmed)
+            }
+        }
+    }
+    foreach ($key in $EnvKeys) {
+        if (-not $seen.ContainsKey($key)) { $outLines.Add("$key=$($Values[$key])") }
+    }
+    # Explicit no-BOM UTF-8, so nothing downstream (Node's dotenv, this script
+    # next time) ever has to deal with a BOM-glued first key again.
+    [System.IO.File]::WriteAllLines($EnvPath, $outLines, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-LiveModels {
+    param([string]$Port)
+    try {
+        $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -TimeoutSec 2 -ErrorAction Stop
+        return @($resp.data | Where-Object { $_.id -like "gemini-*" } | ForEach-Object { $_.id })
+    } catch {
+        return @()
+    }
+}
+
+# ---------------------------------------------------------------------------
+# UI (XAML)
+# ---------------------------------------------------------------------------
+$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Vertex OpenAI Proxy"
+        Width="720" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResizeWithGrip"
+        Background="#F1E3D3"
+        FontFamily="Segoe UI">
+  <Window.Resources>
+    <Style x:Key="PastelButton" TargetType="Button">
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Height" Value="38"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" CornerRadius="14" Background="{TemplateBinding Background}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.82"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Bd" Property="Background" Value="#D8D0C4"/>
+                <Setter Property="Foreground" Value="#8A8272"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <StackPanel Margin="22">
+    <TextBlock Text="Vertex OpenAI Proxy" FontSize="21" FontWeight="Bold" Foreground="#1A1A1A" Margin="0,0,0,10"/>
+
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
+      <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#B23B3B" VerticalAlignment="Center"/>
+      <TextBlock x:Name="StatusText" Text="중지됨" FontWeight="Bold" FontSize="13" Foreground="#1A1A1A" Margin="8,0,0,0" VerticalAlignment="Center"/>
+    </StackPanel>
+
+    <Grid Margin="0,0,0,10">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="190"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="42"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Text="Google Cloud Project ID" FontWeight="Bold" FontSize="12" Grid.Column="0" VerticalAlignment="Center"/>
+      <Border Grid.Column="1" Background="White" CornerRadius="14" Height="36" Margin="0,0,8,0">
+        <Grid>
+          <PasswordBox x:Name="ProjectIdPasswordBox" Background="Transparent" BorderThickness="0"
+                       Padding="12,0" VerticalContentAlignment="Center" FontSize="13"/>
+          <TextBox x:Name="ProjectIdTextBox" Background="Transparent" BorderThickness="0"
+                   Padding="12,0" VerticalContentAlignment="Center" FontSize="13" Visibility="Collapsed"/>
+        </Grid>
+      </Border>
+      <Button x:Name="ToggleMaskButton" Content="&#128065;" Grid.Column="2" Width="36" Height="36"
+              Style="{StaticResource PastelButton}" Background="White" Foreground="Black" FontSize="14"/>
+    </Grid>
+
+    <Grid Margin="0,0,0,10">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="190"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Text="리전 (Location)" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
+      <Border Grid.Column="1" Background="White" CornerRadius="14" Height="36">
+        <TextBox x:Name="LocationTextBox" Background="Transparent" BorderThickness="0"
+                 Padding="12,0" VerticalContentAlignment="Center" FontSize="13"/>
+      </Border>
+    </Grid>
+
+    <Grid Margin="0,0,0,10">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="190"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Text="Gemini 모델" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
+      <Border Grid.Column="1" Background="White" CornerRadius="14" Height="36">
+        <ComboBox x:Name="ModelComboBox" IsEditable="True" Background="Transparent" BorderThickness="0"
+                  FontSize="13" VerticalContentAlignment="Center" Padding="10,0"/>
+      </Border>
+    </Grid>
+
+    <Grid Margin="0,0,0,16">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="190"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Text="포트 (Port)" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
+      <Border Grid.Column="1" Background="White" CornerRadius="14" Height="36">
+        <TextBox x:Name="PortTextBox" Background="Transparent" BorderThickness="0"
+                 Padding="12,0" VerticalContentAlignment="Center" FontSize="13"/>
+      </Border>
+    </Grid>
+
+    <UniformGrid Rows="1" Columns="4" Margin="0,0,0,12">
+      <Button x:Name="StartButton" Content="시작" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#B7E4C7" Foreground="Black"/>
+      <Button x:Name="StopButton" Content="정지" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#F4A9A8" Foreground="Black"/>
+      <Button x:Name="RestartButton" Content="재시작" Margin="0,0,8,0" Style="{StaticResource PastelButton}" Background="#A9C7F4" Foreground="Black"/>
+      <Button x:Name="SaveButton" Content="저장 후 재시작" Style="{StaticResource PastelButton}" Background="#F7D794" Foreground="Black"/>
+    </UniformGrid>
+
+    <TextBlock Text="창을 닫으면 트레이로 최소화됩니다. 완전히 종료하려면 트레이 아이콘 메뉴를 사용하세요."
+               FontSize="10" Foreground="#5A4E42" Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+    <TextBlock x:Name="LogToggleText" Text="&#9660;  로그" FontWeight="Bold" FontSize="11"
+               Foreground="#1A1A1A" Cursor="Hand" Margin="0,0,0,8"/>
+
+    <Border x:Name="LogPanel" Background="#1A1A1A" CornerRadius="16" Height="220">
+      <TextBox x:Name="LogBox" Background="Transparent" Foreground="White" BorderThickness="0"
+               FontFamily="Consolas" FontSize="11" Margin="14"
+               TextWrapping="Wrap" AcceptsReturn="True" IsReadOnly="True"
+               VerticalScrollBarVisibility="Auto"/>
+    </Border>
+  </StackPanel>
+</Window>
+'@
+
+$reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
+$window = [Windows.Markup.XamlReader]::Load($reader)
+
+$StatusDot            = $window.FindName("StatusDot")
+$StatusText           = $window.FindName("StatusText")
+$ProjectIdPasswordBox = $window.FindName("ProjectIdPasswordBox")
+$ProjectIdTextBox     = $window.FindName("ProjectIdTextBox")
+$ToggleMaskButton     = $window.FindName("ToggleMaskButton")
+$LocationTextBox      = $window.FindName("LocationTextBox")
+$ModelComboBox        = $window.FindName("ModelComboBox")
+$PortTextBox          = $window.FindName("PortTextBox")
+$StartButton          = $window.FindName("StartButton")
+$StopButton           = $window.FindName("StopButton")
+$RestartButton        = $window.FindName("RestartButton")
+$SaveButton           = $window.FindName("SaveButton")
+$LogToggleText        = $window.FindName("LogToggleText")
+$LogPanel             = $window.FindName("LogPanel")
+$LogBox               = $window.FindName("LogBox")
+
+# ---------------------------------------------------------------------------
+# UI helpers
+# ---------------------------------------------------------------------------
+function Append-Log {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return }
+    $LogBox.AppendText($Text)
+    $LogBox.ScrollToEnd()
+}
+
+function Append-LogLine {
+    param([string]$Text)
+    Append-Log ("[GUI] $Text`r`n")
+}
+
+$script:BrushConverter = New-Object System.Windows.Media.BrushConverter
+function ConvertTo-Brush {
+    param([string]$Hex)
+    return $script:BrushConverter.ConvertFromString($Hex)
+}
+
+function Set-Status {
+    param([bool]$Running)
+    if ($Running) {
+        $StatusDot.Fill = ConvertTo-Brush "#3B8F5C"
+        $StatusText.Text = "실행 중"
+    } else {
+        $StatusDot.Fill = ConvertTo-Brush "#B23B3B"
+        $StatusText.Text = "중지됨"
+    }
+}
+
+$script:ProjectIdMasked = $true
+function Get-ProjectIdValue {
+    if ($script:ProjectIdMasked) { return $ProjectIdPasswordBox.Password }
+    return $ProjectIdTextBox.Text
+}
+function Set-ProjectIdValue {
+    param([string]$Value)
+    $ProjectIdPasswordBox.Password = $Value
+    $ProjectIdTextBox.Text = $Value
+}
+$ToggleMaskButton.Add_Click({
+    if ($script:ProjectIdMasked) {
+        $ProjectIdTextBox.Text = $ProjectIdPasswordBox.Password
+        $ProjectIdPasswordBox.Visibility = "Collapsed"
+        $ProjectIdTextBox.Visibility = "Visible"
+        $script:ProjectIdMasked = $false
+    } else {
+        $ProjectIdPasswordBox.Password = $ProjectIdTextBox.Text
+        $ProjectIdTextBox.Visibility = "Collapsed"
+        $ProjectIdPasswordBox.Visibility = "Visible"
+        $script:ProjectIdMasked = $true
+    }
+})
+
+$script:LogVisible = $true
+$LogToggleText.Add_MouseLeftButtonUp({
+    $script:LogVisible = -not $script:LogVisible
+    if ($script:LogVisible) {
+        $LogPanel.Visibility = "Visible"
+        $LogToggleText.Text = "$([char]0x25BC)  로그"
+    } else {
+        $LogPanel.Visibility = "Collapsed"
+        $LogToggleText.Text = "$([char]0x25B6)  로그"
+    }
+})
+
+function Get-FormValues {
+    return @{
+        GOOGLE_CLOUD_PROJECT_ID = (Get-ProjectIdValue).Trim()
+        GOOGLE_CLOUD_LOCATION   = $(if ($LocationTextBox.Text.Trim()) { $LocationTextBox.Text.Trim() } else { "global" })
+        GOOGLE_CLOUD_MODEL_ID   = $(if ($ModelComboBox.Text.Trim()) { $ModelComboBox.Text.Trim() } else { "gemini-3.7-flash" })
+        PORT                    = $(if ($PortTextBox.Text.Trim()) { $PortTextBox.Text.Trim() } else { "3000" })
+    }
+}
+
+function Load-EnvIntoForm {
+    $values = Read-EnvValues
+    Set-ProjectIdValue $values.GOOGLE_CLOUD_PROJECT_ID
+    $LocationTextBox.Text = $values.GOOGLE_CLOUD_LOCATION
+    $PortTextBox.Text = $values.PORT
+
+    $liveModels = Get-LiveModels -Port $values.PORT
+    $allModels = @($liveModels + $FallbackModels | Select-Object -Unique)
+    $ModelComboBox.Items.Clear()
+    foreach ($m in $allModels) { [void]$ModelComboBox.Items.Add($m) }
+    $ModelComboBox.Text = $values.GOOGLE_CLOUD_MODEL_ID
+}
+
+function Set-ButtonsBusy {
+    param([bool]$Busy)
+    $StartButton.IsEnabled = -not $Busy
+    $StopButton.IsEnabled = -not $Busy
+    $RestartButton.IsEnabled = -not $Busy
+    $SaveButton.IsEnabled = -not $Busy
+}
+
+# ---------------------------------------------------------------------------
+# Node process management
+# ---------------------------------------------------------------------------
+$script:NodeProcess = $null
+$script:StdoutPath = Join-Path $env:TEMP "vertex-openai-proxy-out.log"
+$script:StderrPath = Join-Path $env:TEMP "vertex-openai-proxy-err.log"
+$script:StdoutOffset = 0
+$script:StderrOffset = 0
+$script:WasRunning = $false
+
+function Sync-EnvIfChanged {
+    $current = Read-EnvValues
+    $formValues = Get-FormValues
+    if ([string]::IsNullOrWhiteSpace($formValues.GOOGLE_CLOUD_PROJECT_ID)) {
+        [System.Windows.MessageBox]::Show("Project ID를 입력해주세요.", "확인 필요", "OK", "Warning") | Out-Null
+        return $false
+    }
+    $changed = $false
+    foreach ($k in $EnvKeys) { if ($current[$k] -ne $formValues[$k]) { $changed = $true } }
+    if ($changed) {
+        Write-EnvValues $formValues
+        Append-LogLine "변경된 설정을 감지해 .env에 저장했습니다."
+    }
+    return $true
+}
+
+function Start-NodeServer {
+    if ($script:NodeProcess -and -not $script:NodeProcess.HasExited) {
+        Append-LogLine "이미 실행 중입니다."
+        return
+    }
+    if (-not (Sync-EnvIfChanged)) { return }
+
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCmd) {
+        [System.Windows.MessageBox]::Show("node 실행 파일을 찾을 수 없습니다. Node.js가 설치되어 있는지 확인해주세요.", "오류", "OK", "Error") | Out-Null
+        return
+    }
+
+    Remove-Item -LiteralPath $script:StdoutPath, $script:StderrPath -ErrorAction SilentlyContinue
+    New-Item -ItemType File -Path $script:StdoutPath -Force | Out-Null
+    New-Item -ItemType File -Path $script:StderrPath -Force | Out-Null
+    $script:StdoutOffset = 0
+    $script:StderrOffset = 0
+
+    try {
+        $proc = Start-Process -FilePath $nodeCmd.Source -ArgumentList "index.js" `
+            -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $script:StdoutPath -RedirectStandardError $script:StderrPath
+    } catch {
+        [System.Windows.MessageBox]::Show("서버 시작 실패: $($_.Exception.Message)", "오류", "OK", "Error") | Out-Null
+        return
+    }
+
+    $script:NodeProcess = $proc
+    $script:WasRunning = $true
+    Set-Status $true
+    Append-LogLine "서버를 시작했습니다."
+}
+
+function Stop-NodeServer {
+    if (-not $script:NodeProcess -or $script:NodeProcess.HasExited) {
+        Append-LogLine "실행 중인 서버가 없습니다."
+        Set-Status $false
+        return
+    }
+    try {
+        $script:NodeProcess.Kill()
+        $script:NodeProcess.WaitForExit(5000) | Out-Null
+    } catch {}
+    $script:WasRunning = $false
+    Set-Status $false
+    Append-LogLine "서버를 정지했습니다."
+}
+
+function Restart-NodeServer {
+    Stop-NodeServer
+    Start-Sleep -Milliseconds 300
+    Start-NodeServer
+}
+
+function Read-NewLogContent {
+    param([string]$Path, [string]$OffsetVarName)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $offset = Get-Variable -Name $OffsetVarName -Scope Script -ValueOnly
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        if ($fs.Length -le $offset) { return }
+        $fs.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+        $buffer = New-Object byte[] ($fs.Length - $offset)
+        [void]$fs.Read($buffer, 0, $buffer.Length)
+        Set-Variable -Name $OffsetVarName -Scope Script -Value $fs.Length
+        $text = [System.Text.Encoding]::UTF8.GetString($buffer)
+        if ($text) { Append-Log $text }
+    } finally {
+        if ($fs) { $fs.Close() }
+    }
+}
+
+# Polls for new Node output and detects the process exiting on its own —
+# a DispatcherTimer tick runs on the same UI thread as ShowDialog()'s message
+# loop, so this is safe without any cross-thread marshaling.
+$timer = New-Object System.Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromMilliseconds(400)
+$timer.Add_Tick({
+    Read-NewLogContent -Path $script:StdoutPath -OffsetVarName "StdoutOffset"
+    Read-NewLogContent -Path $script:StderrPath -OffsetVarName "StderrOffset"
+    if ($script:WasRunning -and $script:NodeProcess -and $script:NodeProcess.HasExited) {
+        $script:WasRunning = $false
+        Set-Status $false
+        Append-LogLine "서버 프로세스가 종료되었습니다."
+    }
+})
+$timer.Start()
+
+$StartButton.Add_Click({ Start-NodeServer })
+$StopButton.Add_Click({ Stop-NodeServer })
+$RestartButton.Add_Click({ Restart-NodeServer })
+$SaveButton.Add_Click({
+    $formValues = Get-FormValues
+    if ([string]::IsNullOrWhiteSpace($formValues.GOOGLE_CLOUD_PROJECT_ID)) {
+        [System.Windows.MessageBox]::Show("Project ID를 입력해주세요.", "확인 필요", "OK", "Warning") | Out-Null
+        return
+    }
+    Write-EnvValues $formValues
+    Append-LogLine ".env를 저장했습니다. 서버를 재시작합니다..."
+    Restart-NodeServer
+})
+
+# ---------------------------------------------------------------------------
+# System tray
+# ---------------------------------------------------------------------------
+$notifyIcon = New-Object System.Windows.Forms.NotifyIcon
+$notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+$notifyIcon.Text = "Vertex OpenAI Proxy"
+$notifyIcon.Visible = $false
+
+$contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$menuOpen = $contextMenu.Items.Add("열기")
+$menuRestartServer = $contextMenu.Items.Add("서버 재시작")
+$menuRestartApp = $contextMenu.Items.Add("GUI 재시작 (프로세스 재시작)")
+$menuQuit = $contextMenu.Items.Add("완전히 종료")
+$notifyIcon.ContextMenuStrip = $contextMenu
+
+function Show-MainWindow {
+    $window.Show()
+    $window.WindowState = "Normal"
+    $window.Activate()
+    $notifyIcon.Visible = $false
+}
+
+$menuOpen.Add_Click({ Show-MainWindow })
+$notifyIcon.Add_DoubleClick({ Show-MainWindow })
+$menuRestartServer.Add_Click({ Restart-NodeServer })
+
+$script:ForceClose = $false
+
+function Quit-App {
+    Stop-NodeServer
+    $timer.Stop()
+    $script:ForceClose = $true
+    $notifyIcon.Visible = $false
+    $notifyIcon.Dispose()
+    try { $mutex.ReleaseMutex() } catch {}
+    Remove-Item -LiteralPath $LockPidPath -ErrorAction SilentlyContinue
+    $window.Close()
+}
+
+function Restart-FullApp {
+    Stop-NodeServer
+    $timer.Stop()
+    $notifyIcon.Visible = $false
+    $notifyIcon.Dispose()
+    try { $mutex.ReleaseMutex() } catch {}
+    Remove-Item -LiteralPath $LockPidPath -ErrorAction SilentlyContinue
+    Start-Process -FilePath "powershell.exe" -ArgumentList @(
+        "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$PSCommandPath`""
+    ) -WorkingDirectory $ProjectRoot
+    $script:ForceClose = $true
+    $window.Close()
+}
+
+$menuRestartApp.Add_Click({ Restart-FullApp })
+$menuQuit.Add_Click({ Quit-App })
+
+$window.Add_Closing({
+    param($sender, $e)
+    if (-not $script:ForceClose) {
+        $e.Cancel = $true
+        $window.Hide()
+        $notifyIcon.Visible = $true
+    }
+})
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+Load-EnvIntoForm
+[void]$window.ShowDialog()
+
+# ShowDialog() only returns once Quit-App/Restart-FullApp actually closed the
+# window; make sure nothing (timer, tray icon) keeps the process alive after that.
+[Environment]::Exit(0)
