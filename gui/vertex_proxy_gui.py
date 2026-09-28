@@ -9,7 +9,7 @@ of leaving a console window open.
 Run with: pythonw vertex_proxy_gui.py   (no console window)
       or: python  vertex_proxy_gui.py   (for debugging, shows console)
 """
-import io
+import json
 import os
 import queue
 import shutil
@@ -19,8 +19,9 @@ import sys
 import threading
 import tkinter as tk
 import urllib.request
-import json
-from tkinter import ttk, messagebox
+from tkinter import messagebox
+
+import customtkinter as ctk
 
 try:
     import pystray
@@ -37,6 +38,7 @@ BEIGE = "#F1E3D3"
 BLACK = "#1A1A1A"
 BLACK_HOVER = "#333333"
 WHITE = "#FFFFFF"
+MUTED = "#5A4E42"
 FONT_NAME = "Segoe UI" if sys.platform == "win32" else "Helvetica"
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -127,129 +129,21 @@ def fetch_live_models(port):
 
 
 # ---------------------------------------------------------------------------
-# Flat rounded button (plain tk.Canvas, no shadows)
-# ---------------------------------------------------------------------------
-class RoundedButton(tk.Canvas):
-    def __init__(self, parent, text, command, width=120, height=36, radius=14,
-                 bg=BLACK, hover=BLACK_HOVER, fg=WHITE, font_size=10):
-        super().__init__(parent, width=width, height=height, bg=parent["bg"],
-                          highlightthickness=0, bd=0)
-        self.command = command
-        self.bg_color = bg
-        self.hover_color = hover
-        self.width = width
-        self.height = height
-        self.radius = radius
-        self._shape = self._round_rect(2, 2, width - 2, height - 2, radius, fill=bg, outline=bg)
-        self._label = self.create_text(width / 2, height / 2, text=text, fill=fg,
-                                        font=(FONT_NAME, font_size, "bold"))
-        self.bind("<Button-1>", self._on_click)
-        self.bind("<Enter>", lambda e: self.itemconfig(self._shape, fill=self.hover_color, outline=self.hover_color))
-        self.bind("<Leave>", lambda e: self.itemconfig(self._shape, fill=self.bg_color, outline=self.bg_color))
-
-    def _round_rect(self, x1, y1, x2, y2, r, **kwargs):
-        points = [
-            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
-            x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
-        ]
-        return self.create_polygon(points, smooth=True, **kwargs)
-
-    def _on_click(self, _event):
-        if self.command:
-            self.command()
-
-    def set_enabled(self, enabled):
-        state_color = self.bg_color if enabled else "#8A8A8A"
-        self.itemconfig(self._shape, fill=state_color, outline=state_color)
-        self.command_enabled = enabled
-
-    def set_text(self, text):
-        self.itemconfig(self._label, text=text)
-
-
-def _round_rect_points(x1, y1, x2, y2, r):
-    return [
-        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
-        x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
-    ]
-
-
-class RoundedEntry(tk.Canvas):
-    """A flat, rounded-corner text entry: a rounded rect drawn on a Canvas
-    with a borderless tk.Entry inset on top of it (same fill color, so the
-    entry blends in and only the canvas corners show as rounded)."""
-
-    def __init__(self, parent, width=300, height=36, radius=14, bg=BLACK, fg=WHITE, font_size=10):
-        super().__init__(parent, width=width, height=height, bg=parent["bg"], highlightthickness=0, bd=0)
-        self.create_polygon(_round_rect_points(2, 2, width - 2, height - 2, radius),
-                             smooth=True, fill=bg, outline=bg)
-        self.entry = tk.Entry(self, bg=bg, fg=fg, insertbackground=fg, relief="flat",
-                               bd=0, highlightthickness=0, font=(FONT_NAME, font_size))
-        inner_width = max(width - radius * 2, 10)
-        self.create_window(radius, height // 2, window=self.entry, anchor="w",
-                            width=inner_width, height=height - 12)
-
-    def get(self):
-        return self.entry.get()
-
-    def insert(self, index, text):
-        return self.entry.insert(index, text)
-
-    def delete(self, first, last=None):
-        return self.entry.delete(first, last)
-
-    def set_masked(self, masked):
-        self.entry.configure(show="•" if masked else "")
-
-
-class RoundedCombo(tk.Canvas):
-    """Same rounded-rect trick as RoundedEntry, hosting a ttk.Combobox."""
-
-    _style_ready = False
-
-    def __init__(self, parent, values, width=300, height=36, radius=14, bg=BLACK, fg=WHITE, font_size=10):
-        super().__init__(parent, width=width, height=height, bg=parent["bg"], highlightthickness=0, bd=0)
-        self.create_polygon(_round_rect_points(2, 2, width - 2, height - 2, radius),
-                             smooth=True, fill=bg, outline=bg)
-
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure("Rounded.TCombobox", fieldbackground=bg, background=bg,
-                         foreground=fg, arrowcolor=fg, borderwidth=0, relief="flat")
-        style.map("Rounded.TCombobox", fieldbackground=[("readonly", bg)])
-        root = parent.winfo_toplevel()
-        root.option_add("*TCombobox*Listbox.background", bg)
-        root.option_add("*TCombobox*Listbox.foreground", fg)
-        root.option_add("*TCombobox*Listbox.selectBackground", BLACK_HOVER)
-        root.option_add("*TCombobox*Listbox.selectForeground", fg)
-
-        self.combo = ttk.Combobox(self, values=values, style="Rounded.TCombobox", font=(FONT_NAME, font_size))
-        inner_width = max(width - radius * 2, 10)
-        self.create_window(radius, height // 2, window=self.combo, anchor="w",
-                            width=inner_width, height=height - 12)
-
-    def get(self):
-        return self.combo.get()
-
-    def set(self, value):
-        return self.combo.set(value)
-
-    def set_values(self, values):
-        self.combo["values"] = values
-
-
-# ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
 class ProxyGuiApp:
     def __init__(self, lock_socket=None):
         self.lock_socket = lock_socket
-        self.root = tk.Tk()
+
+        ctk.set_appearance_mode("light")
+        ctk.set_default_color_theme("dark-blue")
+
+        self.root = ctk.CTk()
         self.root.title("Vertex OpenAI Proxy")
-        self.root.configure(bg=BEIGE)
+        try:
+            self.root.configure(fg_color=BEIGE)
+        except Exception:
+            self.root.configure(bg=BEIGE)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         self.root.bind("<Unmap>", self._on_unmap)
 
@@ -261,7 +155,7 @@ class ProxyGuiApp:
         self._load_env_into_fields()
 
         # Size the window to fit its content exactly (no leftover margin),
-        # instead of an arbitrary fixed geometry.
+        # instead of a guessed fixed geometry.
         self.root.update_idletasks()
         width = self.root.winfo_reqwidth()
         height = self.root.winfo_reqheight()
@@ -272,63 +166,72 @@ class ProxyGuiApp:
 
     # -- UI ----------------------------------------------------------------
     def _build_ui(self):
-        pad = {"padx": 16, "pady": 6}
+        header = ctk.CTkLabel(self.root, text="Vertex OpenAI Proxy", bg_color=BEIGE,
+                               text_color=BLACK, font=(FONT_NAME, 20, "bold"))
+        header.pack(anchor="w", padx=20, pady=(20, 6))
 
-        header = tk.Label(self.root, text="Vertex OpenAI Proxy", bg=BEIGE, fg=BLACK,
-                           font=(FONT_NAME, 18, "bold"))
-        header.pack(anchor="w", padx=16, pady=(16, 4))
+        status_row = ctk.CTkFrame(self.root, fg_color=BEIGE)
+        status_row.pack(anchor="w", padx=20, pady=(0, 14))
+        self.status_dot = ctk.CTkLabel(status_row, text="●", text_color="#B23B3B",
+                                        bg_color=BEIGE, font=(FONT_NAME, 12))
+        self.status_dot.pack(side="left")
+        self.status_label = ctk.CTkLabel(status_row, text="중지됨", bg_color=BEIGE,
+                                          text_color=BLACK, font=(FONT_NAME, 11, "bold"))
+        self.status_label.pack(side="left", padx=(6, 0))
 
-        self.status_canvas = tk.Canvas(self.root, width=14, height=14, bg=BEIGE, highlightthickness=0)
-        self.status_dot = self.status_canvas.create_oval(2, 2, 12, 12, fill="#B23B3B", outline="")
-        status_row = tk.Frame(self.root, bg=BEIGE)
-        status_row.pack(anchor="w", padx=16, pady=(0, 12))
-        self.status_canvas.pack(in_=status_row, side="left")
-        self.status_label = tk.Label(status_row, text="중지됨", bg=BEIGE, fg=BLACK, font=(FONT_NAME, 10, "bold"))
-        self.status_label.pack(side="left", padx=(8, 0))
-
-        form = tk.Frame(self.root, bg=BEIGE)
-        form.pack(fill="x", padx=16)
+        form = ctk.CTkFrame(self.root, fg_color=BEIGE)
+        form.pack(fill="x", padx=20)
 
         self.entry_project = self._add_field(form, "Google Cloud Project ID", maskable=True)
         self.entry_location = self._add_field(form, "리전 (Location)")
         self.combo_model = self._add_model_field(form, "Gemini 모델")
         self.entry_port = self._add_field(form, "포트 (Port)")
 
-        btn_row = tk.Frame(self.root, bg=BEIGE)
-        btn_row.pack(fill="x", padx=16, pady=(14, 8))
+        btn_row = ctk.CTkFrame(self.root, fg_color=BEIGE)
+        btn_row.pack(fill="x", padx=20, pady=(16, 10))
 
-        self.btn_start = RoundedButton(btn_row, "시작", self.start_server, width=90)
-        self.btn_stop = RoundedButton(btn_row, "정지", self.stop_server, width=90)
-        self.btn_restart = RoundedButton(btn_row, "재시작", self.restart_server, width=90)
-        self.btn_save = RoundedButton(btn_row, "저장 후 재시작", self.save_and_restart, width=150)
+        self.btn_start = self._make_button(btn_row, "시작", self.start_server, width=90)
+        self.btn_stop = self._make_button(btn_row, "정지", self.stop_server, width=90)
+        self.btn_restart = self._make_button(btn_row, "재시작", self.restart_server, width=90)
+        self.btn_save = self._make_button(btn_row, "저장 후 재시작", self.save_and_restart, width=150)
 
         for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_save):
             b.pack(side="left", padx=(0, 10))
 
-        tray_hint = tk.Label(self.root, text="창을 닫으면 트레이로 최소화됩니다. 완전히 종료하려면 트레이 아이콘 메뉴를 사용하세요.",
-                              bg=BEIGE, fg="#5A4E42", font=(FONT_NAME, 8))
-        tray_hint.pack(anchor="w", padx=16, pady=(0, 8))
+        tray_hint = ctk.CTkLabel(
+            self.root,
+            text="창을 닫으면 트레이로 최소화됩니다. 완전히 종료하려면 트레이 아이콘 메뉴를 사용하세요.",
+            bg_color=BEIGE, text_color=MUTED, font=(FONT_NAME, 9),
+        )
+        tray_hint.pack(anchor="w", padx=20, pady=(0, 10))
 
         # -- log (collapsible / accordion) --
-        log_header = tk.Frame(self.root, bg=BEIGE)
-        log_header.pack(fill="x", padx=16)
-        self.log_toggle_label = tk.Label(log_header, text="▼  로그", bg=BEIGE, fg=BLACK,
-                                          font=(FONT_NAME, 9, "bold"), cursor="hand2")
+        log_header = ctk.CTkFrame(self.root, fg_color=BEIGE)
+        log_header.pack(fill="x", padx=20)
+        self.log_toggle_label = ctk.CTkLabel(log_header, text="▼  로그", bg_color=BEIGE,
+                                              text_color=BLACK, font=(FONT_NAME, 10, "bold"),
+                                              cursor="hand2")
         self.log_toggle_label.pack(side="left")
         self.log_toggle_label.bind("<Button-1>", lambda e: self._toggle_log())
 
         self.log_visible = True
-        self.log_frame = tk.Frame(self.root, bg=BLACK)
-        self.log_frame.pack(fill="both", expand=True, padx=16, pady=(4, 16))
-        self.log_text = tk.Text(self.log_frame, bg=BLACK, fg=WHITE, insertbackground=WHITE,
-                                 relief="flat", bd=0, font=("Consolas", 9), wrap="word", height=12)
-        self.log_text.pack(fill="both", expand=True, padx=1, pady=1)
+        self.log_frame = ctk.CTkFrame(self.root, fg_color=BLACK, corner_radius=14)
+        self.log_frame.pack(fill="both", expand=True, padx=20, pady=(6, 20))
+        self.log_text = ctk.CTkTextbox(self.log_frame, fg_color=BLACK, text_color=WHITE,
+                                        corner_radius=14, border_width=0,
+                                        font=("Consolas", 10), wrap="word", height=220)
+        self.log_text.pack(fill="both", expand=True, padx=4, pady=4)
         self.log_text.configure(state="disabled")
+
+    def _make_button(self, parent, text, command, width=90):
+        return ctk.CTkButton(parent, text=text, command=command, width=width, height=36,
+                              corner_radius=14, fg_color=BLACK, hover_color=BLACK_HOVER,
+                              text_color=WHITE, font=(FONT_NAME, 11, "bold"), border_width=0)
 
     def _toggle_log(self):
         self.log_visible = not self.log_visible
         if self.log_visible:
-            self.log_frame.pack(fill="both", expand=True, padx=16, pady=(4, 16))
+            self.log_frame.pack(fill="both", expand=True, padx=20, pady=(6, 20))
             self.log_toggle_label.configure(text="▼  로그")
         else:
             self.log_frame.pack_forget()
@@ -344,33 +247,43 @@ class ProxyGuiApp:
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
     def _add_field(self, parent, label_text, maskable=False):
-        row = tk.Frame(parent, bg=BEIGE)
-        row.pack(fill="x", pady=4)
-        tk.Label(row, text=label_text, bg=BEIGE, fg=BLACK, font=(FONT_NAME, 9, "bold"),
-                 width=24, anchor="w").pack(side="left")
-        entry_width = 440 - 42 if maskable else 440
-        entry = RoundedEntry(row, width=entry_width, height=36)
+        row = ctk.CTkFrame(parent, fg_color=BEIGE)
+        row.pack(fill="x", pady=5)
+        ctk.CTkLabel(row, text=label_text, bg_color=BEIGE, text_color=BLACK,
+                     font=(FONT_NAME, 10, "bold"), width=190, anchor="w").pack(side="left")
+
+        entry_width = 400 if maskable else 440
+        entry = ctk.CTkEntry(row, width=entry_width, height=36, corner_radius=14,
+                              fg_color=BLACK, text_color=WHITE, border_width=0,
+                              font=(FONT_NAME, 11))
         entry.pack(side="left")
+
         if maskable:
             entry._masked = True
-            entry.set_masked(True)
-            toggle = RoundedButton(row, "\U0001F441", lambda: self._toggle_mask(entry, toggle),
-                                    width=36, height=36, radius=12, font_size=12)
+            entry.configure(show="•")
+            toggle = ctk.CTkButton(row, text="\U0001F441", width=36, height=36, corner_radius=12,
+                                    fg_color=BLACK, hover_color=BLACK_HOVER, text_color=WHITE,
+                                    font=(FONT_NAME, 12), border_width=0,
+                                    command=lambda: self._toggle_mask(entry, toggle))
             toggle.pack(side="left", padx=(6, 0))
         return entry
 
     def _toggle_mask(self, entry, toggle_button):
         masked = not getattr(entry, "_masked", True)
         entry._masked = masked
-        entry.set_masked(masked)
-        toggle_button.set_text("\U0001F441" if masked else "\U0001F576")
+        entry.configure(show="•" if masked else "")
+        toggle_button.configure(text="\U0001F441" if masked else "\U0001F576")
 
     def _add_model_field(self, parent, label_text):
-        row = tk.Frame(parent, bg=BEIGE)
-        row.pack(fill="x", pady=4)
-        tk.Label(row, text=label_text, bg=BEIGE, fg=BLACK, font=(FONT_NAME, 9, "bold"),
-                 width=24, anchor="w").pack(side="left")
-        combo = RoundedCombo(row, values=FALLBACK_MODELS, width=440, height=36)
+        row = ctk.CTkFrame(parent, fg_color=BEIGE)
+        row.pack(fill="x", pady=5)
+        ctk.CTkLabel(row, text=label_text, bg_color=BEIGE, text_color=BLACK,
+                     font=(FONT_NAME, 10, "bold"), width=190, anchor="w").pack(side="left")
+        combo = ctk.CTkComboBox(row, values=FALLBACK_MODELS, width=440, height=36,
+                                 corner_radius=14, fg_color=BLACK, text_color=WHITE,
+                                 button_color=BLACK_HOVER, button_hover_color=BLACK_HOVER,
+                                 dropdown_fg_color=BLACK, dropdown_text_color=WHITE,
+                                 border_width=0, font=(FONT_NAME, 11))
         combo.pack(side="left")
         return combo
 
@@ -387,7 +300,7 @@ class ProxyGuiApp:
 
         live_models = fetch_live_models(values["PORT"])
         merged = list(dict.fromkeys(live_models + FALLBACK_MODELS))
-        self.combo_model.set_values(merged)
+        self.combo_model.configure(values=merged)
 
     def _fields_to_env(self):
         return {
@@ -429,7 +342,7 @@ class ProxyGuiApp:
     def _set_status(self, running):
         color = "#3B8F5C" if running else "#B23B3B"
         text = "실행 중" if running else "중지됨"
-        self.status_canvas.itemconfig(self.status_dot, fill=color)
+        self.status_dot.configure(text_color=color)
         self.status_label.configure(text=text)
 
     def start_server(self):
