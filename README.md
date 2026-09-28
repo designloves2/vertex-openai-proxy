@@ -2,7 +2,7 @@
 
 A local proxy that translates OpenAI-format API requests (`/v1/chat/completions`, `/v1/responses`) into Google Vertex AI (Gemini) API requests, so OpenAI-compatible tools and coding agents can talk to Gemini models on Vertex AI.
 
-This fork fixes several issues in the original release that caused authentication failures, wrong model routing, broken streaming, and multi-turn tool-calling errors on Gemini 3.x. See `CHANGELOG.md` for the full list of fixes.
+This project was inspired by an earlier open-source Vertex-to-OpenAI proxy concept, but the authentication, model routing, streaming parser, and tool-calling logic have been substantially rewritten to fix issues that caused authentication failures, wrong model routing, broken streaming, and multi-turn tool-calling errors on Gemini 3.x. See `CHANGELOG.md` for the full list of changes and [LICENSE](./LICENSE) for licensing terms.
 
 ## 🔥 Features
 - **OpenAI API Compatibility:** Supports `/v1/chat/completions` and `/v1/responses`, both streaming and non-streaming.
