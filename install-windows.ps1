@@ -22,6 +22,16 @@ function Test-Command($name) {
     return [bool](Get-Command $name -ErrorAction SilentlyContinue)
 }
 
+function Refresh-Path {
+    # winget/MSI installers update the registry PATH but this running
+    # PowerShell session doesn't pick it up automatically. Re-read it
+    # from the registry (Machine + User) so newly installed CLIs are
+    # usable without closing and reopening the window.
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+}
+
 # ---------------------------------------------------------------------------
 # 1. winget 확인
 # ---------------------------------------------------------------------------
@@ -39,11 +49,14 @@ Step "2/8 Node.js 확인"
 if (-not (Test-Command "node")) {
     Write-Host "Node.js가 설치되어 있지 않습니다. 설치를 진행합니다..."
     winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
-    Write-Host "설치가 끝났습니다. 이 창을 닫고 새 PowerShell 창에서 스크립트를 다시 실행해주세요." -ForegroundColor Yellow
-    exit 0
-} else {
-    Write-Host "Node.js 확인됨: $(node --version)"
+    Refresh-Path
 }
+if (-not (Test-Command "node")) {
+    Warn "Node.js 설치 후에도 이 창에서 인식되지 않습니다. 창을 닫고 새 PowerShell/명령 프롬프트를 열어 install-windows.bat을 다시 실행해주세요."
+    Read-Host "계속하려면 Enter를 누르세요"
+    exit 0
+}
+Write-Host "Node.js 확인됨: $(node --version)"
 
 # ---------------------------------------------------------------------------
 # 3. Google Cloud CLI
@@ -52,11 +65,14 @@ Step "3/8 Google Cloud CLI(gcloud) 확인"
 if (-not (Test-Command "gcloud")) {
     Write-Host "gcloud가 설치되어 있지 않습니다. 설치를 진행합니다..."
     winget install --id Google.CloudSDK -e --source winget --accept-package-agreements --accept-source-agreements
-    Write-Host "설치가 끝났습니다. 이 창을 닫고 새 PowerShell 창에서 스크립트를 다시 실행해주세요." -ForegroundColor Yellow
-    exit 0
-} else {
-    Write-Host "gcloud 확인됨: $(gcloud --version | Select-Object -First 1)"
+    Refresh-Path
 }
+if (-not (Test-Command "gcloud")) {
+    Warn "gcloud 설치 후에도 이 창에서 인식되지 않습니다. 창을 닫고 새 PowerShell/명령 프롬프트를 열어 install-windows.bat을 다시 실행해주세요."
+    Read-Host "계속하려면 Enter를 누르세요"
+    exit 0
+}
+Write-Host "gcloud 확인됨: $(gcloud --version | Select-Object -First 1)"
 
 # ---------------------------------------------------------------------------
 # 4. npm 의존성 설치
