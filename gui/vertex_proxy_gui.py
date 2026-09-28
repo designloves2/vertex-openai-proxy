@@ -42,10 +42,24 @@ def log_crash(exc_type, exc_value, exc_tb):
         pass
 
 
+def log_checkpoint(msg):
+    """Startup progress markers, so if the process hangs (no exception, just
+    stuck) we can tell exactly which step it got stuck on by reading
+    crash.log — the last line logged is the last thing that happened."""
+    try:
+        with open(CRASH_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+
 sys.excepthook = log_crash
+log_checkpoint("process started")
 
 try:
+    log_checkpoint("importing webview...")
     import webview
+    log_checkpoint("webview imported OK")
 except Exception:
     log_crash(*sys.exc_info())
     _root = tk.Tk()
@@ -190,8 +204,15 @@ class Api:
         self.tray_icon = None
         self.lock_socket = None
 
+    def js_log(self, msg):
+        """Lets index.html report checkpoints/errors into crash.log, so we can
+        tell whether the page's JS ever ran at all vs. the native window
+        never finishing setup."""
+        log_checkpoint(f"[JS] {msg}")
+
     # -- env --
     def get_env(self):
+        log_checkpoint("get_env() called from JS")
         return read_env()
 
     def _validate_and_write(self, values):
@@ -376,10 +397,12 @@ class Api:
 
 
 def main(lock_socket):
+    log_checkpoint("main() started")
     api = Api()
     api.lock_socket = lock_socket
 
     index_path = os.path.join(GUI_DIR, "index.html")
+    log_checkpoint(f"calling webview.create_window (index={index_path})")
     window = webview.create_window(
         "Vertex OpenAI Proxy",
         index_path,
@@ -389,6 +412,7 @@ def main(lock_socket):
         min_size=(680, 480),
         background_color="#F1E3D3",
     )
+    log_checkpoint("create_window returned")
     api.window = window
 
     def on_closing():
@@ -396,6 +420,11 @@ def main(lock_socket):
         return False  # cancel the actual close; we just hid the window
 
     window.events.closing += on_closing
+
+    def on_loaded():
+        log_checkpoint("window 'loaded' event fired (HTML/JS finished loading)")
+
+    window.events.loaded += on_loaded
 
     # Force the modern Edge/Chromium engine on Windows instead of letting
     # pywebview silently fall back to the ancient MSHTML (Trident/IE) engine
@@ -407,7 +436,9 @@ def main(lock_socket):
     # backend makes a real setup problem fail loudly (into crash.log)
     # instead of freezing silently.
     gui_backend = "edgechromium" if sys.platform == "win32" else None
+    log_checkpoint(f"calling webview.start(gui={gui_backend!r}) — this blocks until the window closes")
     webview.start(debug=False, gui=gui_backend)
+    log_checkpoint("webview.start() returned (window closed)")
 
 
 if __name__ == "__main__":
