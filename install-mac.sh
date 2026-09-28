@@ -26,7 +26,7 @@ err()  { echo -e "${RED}[ERROR] $1${RESET}"; }
 # ---------------------------------------------------------------------------
 # 1. Homebrew
 # ---------------------------------------------------------------------------
-step "1/7 Homebrew 확인"
+step "1/8 Homebrew 확인"
 if ! command -v brew >/dev/null 2>&1; then
     echo "Homebrew가 설치되어 있지 않습니다. 설치를 진행합니다..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -40,7 +40,7 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Node.js
 # ---------------------------------------------------------------------------
-step "2/7 Node.js 확인"
+step "2/8 Node.js 확인"
 if ! command -v node >/dev/null 2>&1; then
     echo "Node.js가 설치되어 있지 않습니다. 설치를 진행합니다..."
     brew install node
@@ -51,7 +51,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Google Cloud CLI
 # ---------------------------------------------------------------------------
-step "3/7 Google Cloud CLI(gcloud) 확인"
+step "3/8 Google Cloud CLI(gcloud) 확인"
 if ! command -v gcloud >/dev/null 2>&1; then
     echo "gcloud가 설치되어 있지 않습니다. 설치를 진행합니다..."
     brew install --cask google-cloud-sdk
@@ -72,13 +72,13 @@ fi
 # ---------------------------------------------------------------------------
 # 4. npm dependencies
 # ---------------------------------------------------------------------------
-step "4/7 npm 의존성 설치"
+step "4/8 npm 의존성 설치"
 npm install
 
 # ---------------------------------------------------------------------------
 # 5. .env 설정
 # ---------------------------------------------------------------------------
-step "5/7 .env 설정"
+step "5/8 .env 설정"
 if [[ -f ".env" ]]; then
     echo ".env 파일이 이미 존재합니다. 기존 값을 유지합니다. (재설정하려면 .env를 삭제하고 다시 실행하세요)"
 else
@@ -112,7 +112,7 @@ PROJECT_ID_VALUE="$(grep -E '^GOOGLE_CLOUD_PROJECT_ID=' .env | cut -d '=' -f2-)"
 # ---------------------------------------------------------------------------
 # 6. Google 인증 (ADC)
 # ---------------------------------------------------------------------------
-step "6/7 Google Cloud 인증 (Application Default Credentials)"
+step "6/8 Google Cloud 인증 (Application Default Credentials)"
 echo "브라우저 창이 열립니다. Google 계정으로 로그인 후 권한을 승인해주세요."
 gcloud auth application-default login
 
@@ -137,9 +137,25 @@ gcloud services enable aiplatform.googleapis.com --project "${PROJECT_ID_VALUE}"
     || warn "API 활성화에 실패했습니다. Google Cloud Console에서 직접 활성화해주세요: https://console.cloud.google.com/apis/library/aiplatform.googleapis.com"
 
 # ---------------------------------------------------------------------------
-# 7. 완료 및 서버 실행
+# 7. 실행용 스크립트 생성
 # ---------------------------------------------------------------------------
-step "7/7 설치 완료"
+step "7/8 실행용 스크립트 생성"
+RUN_SCRIPT_PATH="$SCRIPT_DIR/vertex-openai-proxy-run.sh"
+cat > "$RUN_SCRIPT_PATH" <<'EOF'
+#!/usr/bin/env bash
+# Double-click (or run) this script to start the vertex-openai-proxy server.
+cd "$(dirname "${BASH_SOURCE[0]}")"
+npm run start
+EOF
+chmod +x "$RUN_SCRIPT_PATH"
+echo "생성됨: $RUN_SCRIPT_PATH"
+echo "다음부터는 터미널에서 ./vertex-openai-proxy-run.sh 를 실행하면 서버가 시작됩니다."
+echo "Finder에서 더블클릭으로 실행하려면: 파일 우클릭 > 정보 가져오기 > '다음 프로그램으로 열기'에서 터미널을 선택하세요."
+
+# ---------------------------------------------------------------------------
+# 8. 완료 및 서버 실행
+# ---------------------------------------------------------------------------
+step "8/8 설치 완료"
 echo "모든 준비가 끝났습니다!"
 echo ""
 read -rp "지금 서버를 시작할까요? (y/N): " START_NOW
@@ -147,5 +163,5 @@ if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
     npm run start
 else
     echo "나중에 서버를 시작하려면 다음 명령을 실행하세요:"
-    echo "  npm run start"
+    echo "  ./vertex-openai-proxy-run.sh"
 fi

@@ -25,7 +25,7 @@ function Test-Command($name) {
 # ---------------------------------------------------------------------------
 # 1. winget 확인
 # ---------------------------------------------------------------------------
-Step "1/7 winget 확인"
+Step "1/8 winget 확인"
 if (-not (Test-Command "winget")) {
     Err "winget이 없습니다. Microsoft Store에서 'App Installer'를 설치한 뒤 다시 실행해주세요."
     exit 1
@@ -35,7 +35,7 @@ Write-Host "winget 확인됨"
 # ---------------------------------------------------------------------------
 # 2. Node.js
 # ---------------------------------------------------------------------------
-Step "2/7 Node.js 확인"
+Step "2/8 Node.js 확인"
 if (-not (Test-Command "node")) {
     Write-Host "Node.js가 설치되어 있지 않습니다. 설치를 진행합니다..."
     winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
@@ -48,7 +48,7 @@ if (-not (Test-Command "node")) {
 # ---------------------------------------------------------------------------
 # 3. Google Cloud CLI
 # ---------------------------------------------------------------------------
-Step "3/7 Google Cloud CLI(gcloud) 확인"
+Step "3/8 Google Cloud CLI(gcloud) 확인"
 if (-not (Test-Command "gcloud")) {
     Write-Host "gcloud가 설치되어 있지 않습니다. 설치를 진행합니다..."
     winget install --id Google.CloudSDK -e --source winget --accept-package-agreements --accept-source-agreements
@@ -61,13 +61,13 @@ if (-not (Test-Command "gcloud")) {
 # ---------------------------------------------------------------------------
 # 4. npm 의존성 설치
 # ---------------------------------------------------------------------------
-Step "4/7 npm 의존성 설치"
+Step "4/8 npm 의존성 설치"
 npm install
 
 # ---------------------------------------------------------------------------
 # 5. .env 설정
 # ---------------------------------------------------------------------------
-Step "5/7 .env 설정"
+Step "5/8 .env 설정"
 $envPath = Join-Path $PSScriptRoot ".env"
 if (Test-Path $envPath) {
     Write-Host ".env 파일이 이미 존재합니다. 기존 값을 유지합니다. (재설정하려면 .env를 삭제하고 다시 실행하세요)"
@@ -102,7 +102,7 @@ $ProjectIdValue = ($envLines | Where-Object { $_ -match '^GOOGLE_CLOUD_PROJECT_I
 # ---------------------------------------------------------------------------
 # 6. Google 인증 (ADC)
 # ---------------------------------------------------------------------------
-Step "6/7 Google Cloud 인증 (Application Default Credentials)"
+Step "6/8 Google Cloud 인증 (Application Default Credentials)"
 Write-Host "브라우저 창이 열립니다. Google 계정으로 로그인 후 권한을 승인해주세요."
 gcloud auth application-default login
 
@@ -137,15 +137,31 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# 7. 완료 및 서버 실행
+# 7. 실행용 배치 파일 생성
 # ---------------------------------------------------------------------------
-Step "7/7 설치 완료"
+Step "7/8 실행용 배치 파일 생성"
+$runBatPath = Join-Path $PSScriptRoot "vertex-openai-proxy-run.bat"
+$runBatContent = @"
+@echo off
+REM Double-click this file to start the vertex-openai-proxy server.
+cd /d "%~dp0"
+npm run start
+pause
+"@
+Set-Content -Path $runBatPath -Value $runBatContent -Encoding ASCII
+Write-Host "생성됨: $runBatPath"
+Write-Host "다음부터는 이 파일을 더블클릭하면 서버가 시작됩니다."
+
+# ---------------------------------------------------------------------------
+# 8. 완료 및 서버 실행
+# ---------------------------------------------------------------------------
+Step "8/8 설치 완료"
 Write-Host "모든 준비가 끝났습니다!"
 Write-Host ""
 $StartNow = Read-Host "지금 서버를 시작할까요? (y/N)"
 if ($StartNow -match '^[Yy]') {
     npm run start
 } else {
-    Write-Host "나중에 서버를 시작하려면 다음 명령을 실행하세요:"
+    Write-Host "나중에 서버를 시작하려면 vertex-openai-proxy-run.bat 파일을 더블클릭하거나 다음 명령을 실행하세요:"
     Write-Host "  npm run start"
 }
