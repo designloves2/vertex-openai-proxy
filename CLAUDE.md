@@ -1,189 +1,68 @@
-# Vertex OpenAI Proxy — GUI debugging history
+# Vertex OpenAI Proxy — GUI (`gui/VertexProxyGui.ps1`)
 
-## Status: working, user-confirmed. One known real limitation (system tray)
+## Status: done, user-confirmed working in daily use
 
-The user has confirmed the GUI works end-to-end in daily use: launches with
-no console window, Start/Stop/Restart/Save & Restart all work against a
-real node process, `.env` autosave works, field masking works, the log
-panel resizes with the window.
+Pure PowerShell + WPF control panel (no Python, no external runtime — WPF
+ships with Windows). Launches with no console window, Start/Stop/Restart/
+Save & Restart all work against a real node process, `.env` autosave works,
+field masking works, the log panel resizes with the window.
 
-### Known remaining issue: doesn't actually minimize to the system tray
-Closing the window (X) currently behaves like a normal minimize — it drops
-to a taskbar icon, not the system tray/notification area near the clock.
-The taskbar icon's own right-click Jump List (Open / Restart Server / Quit,
-via `SendCommand.vbs` + `.gui-command`) does work correctly, and the
-process does NOT die when the window "closes" (confirmed: it keeps running,
-right-click menu still functions) — so this is cosmetic/placement, not a
-process-lifetime bug. The user is fine using it via the taskbar icon for
-now; revisit `$notifyIcon` (`System.Windows.Forms.NotifyIcon`) if this
-becomes worth chasing further. Untested hypothesis, not yet investigated:
-mixing a WinForms `NotifyIcon` with a WPF-only message loop (`$window.ShowDialog()`,
-no `System.Windows.Forms.Application.Run()`) may need something extra for
-`Shell_NotifyIcon` to actually place the icon rather than just flip
-`.Visible`.
+**System tray: intentionally not pursued further.** Closing the window (X)
+drops it to a taskbar icon rather than the notification-area tray icon near
+the clock. The taskbar icon's right-click Jump List (Open / Restart Server /
+Quit, via `gui/SendCommand.vbs` + a `.gui-command` file the app polls) works
+correctly and the process stays alive — functionally equivalent to a real
+tray icon, just a different location. Multiple attempts to get a real
+`System.Windows.Forms.NotifyIcon` to actually place an icon (rather than
+just flip `.Visible`) failed under WPF's `ShowDialog()` message loop; the
+user has decided this isn't worth a full rewrite (e.g. a compiled C#/.NET
+app) to chase. **Don't re-attempt this without the user explicitly asking.**
 
-### Fixed along the way (see git log for full detail per commit)
-- **Parse-time crash on launch**: `gui/VertexProxyGui.ps1` needed a UTF-8
-  BOM (Windows PowerShell 5.1 + non-ASCII text without one silently
-  misreads the file — see the very bottom of this doc for the full
-  writeup, kept as a reference for this recurring class of bug).
-- **"Start" silently did nothing**: no fallback when `node` wasn't on the
-  launching process's PATH (common after a winget/nvm install) — added
-  `Find-NodeExe`, plus made every failure path log to the GUI's own panel
-  instead of only a MessageBox.
-- **Visible console window / wrong taskbar identity**: switched to a VBS
-  launcher (`gui/LaunchHidden.vbs`, bypasses Windows 11's "open new
-  console apps in Windows Terminal" setting) and
-  `SetCurrentProcessExplicitAppUserModelID` + a real `System.Windows.Shell.JumpList`
-  for the taskbar right-click menu (`gui/SendCommand.vbs` relays Jump List
-  clicks back into the running instance via a `.gui-command` file the
-  existing `DispatcherTimer` poll picks up).
-- **Duplicate-instance handoff got permanently stuck**: the mutex retry
-  loop never disposed failed handles, so the *new* process ended up being
-  the one keeping the old mutex alive — fixed by disposing every
-  non-owning handle immediately, and by asking the existing instance to
-  quit gracefully (via the same `.gui-command` channel) before falling
-  back to `Stop-Process` by PID.
-- **Crash on Restart / Save & Restart**: `New-Item -Force` on the node
-  server's stdout/stderr log files raced with Windows still finishing
-  release of the just-killed process's file handle — removed the
-  redundant pre-creation entirely (`Start-Process -RedirectStandardOutput`
-  already truncates/creates the file itself).
-- **EADDRINUSE on Restart**: same class of race, for the TCP port instead
-  of a file handle — `Stop-NodeServer` now polls `Get-NetTCPConnection`
-  for the port to actually clear before `Start-NodeServer` tries to bind
-  it again, instead of a fixed 300ms guess.
-- **Log panel didn't grow when the window was resized**: root layout was
-  a `StackPanel` (every row sized to content); converted to a `Grid` with
-  the log panel's row as `Height="*"`.
-- **Wrong fallback model ID**: `gemini-3.1-pro` 404s against Vertex AI;
-  the real id (confirmed via AI Studio / Cloud Console) is
-  `gemini-3.1-pro-preview`.
-- A launcher log-file lock (no owning process visible, possibly AV/EDR
-  real-time scanning) could make the *entire app* fail to launch with zero
-  trace anywhere, because `cmd.exe`'s own `1> file` redirection has to
-  successfully open the target before it'll even start `powershell.exe`.
-  Fixed by giving each launch its own timestamped log filenames instead of
-  a fixed pair.
+## Architecture notes
 
-Separately, unrelated to the GUI: `index.js` had a literally-corrupted
-byte sequence in a console.log string (`'  ?뮕 TIP: ...'` — garbled bytes
-baked into the file itself, not a runtime encoding issue), replaced with
-plain ASCII (`[TIP]`).
-
-## Status: launch fixed and verified; Start/Stop/Restart now verified working end-to-end
-
-The BOM/encoding fix below made the GUI launch. A second, separate bug was
-then found and fixed: **"Start" silently did nothing on a machine where
-Node.js is installed but not on the current process's PATH** (e.g. installed
-via winget/nvm after Explorer.exe's environment was last refreshed — a
-common Windows gotcha). `Start-NodeServer` used to call `Get-Command node`
-with no fallback, so on such a machine it always failed to find node —
-and depending on how it's invoked, could fail *silently* (no dialog, no log
-line) because `[System.Windows.MessageBox]::Show(...)` calls from inside a
-button-click handler are unreliable when the click itself was delivered via
-UI Automation's `InvokePattern.Invoke()` (as opposed to a real physical
-mouse click) — a Windows UIA reentrancy quirk, confirmed while testing this
-headlessly. Two fixes, both committed:
-1. Added `Find-NodeExe` (falls back to `%ProgramFiles%\nodejs\node.exe`,
-   `%ProgramFiles(x86)%\nodejs\node.exe`, `%LOCALAPPDATA%\Programs\nodejs\node.exe`,
-   and any `%APPDATA%\nvm\<version>\node.exe`) before giving up.
-2. Every failure path in `Start-NodeServer` / `Sync-EnvIfChanged` /
-   `SaveButton` now also calls `Append-LogLine` (not just a MessageBox), so
-   a failure is never invisible even if the MessageBox itself doesn't render
-   for some reason.
-
-Verified locally (real Node process started, `/health` responded 200, Stop
-actually killed the process, Restart worked, changing the Model dropdown
-and clicking Restart correctly rewrote `.env` with no duplicate lines, "Save
-& Restart" correctly blocked and logged a warning on an empty Project ID
-without touching the running server). The mask toggle and log-panel
-collapse/expand were also verified working. The tray icon's own context
-menu (right-click items, double-click-to-restore) and the duplicate-instance
-prompt could not be fully re-verified after this last round of fixes — they
-rely on real OS-level mouse clicks / the system tray, which isn't something
-that can be driven safely from this side without risking clicks landing on
-unrelated windows on the user's live desktop. Recommend the user manually
-click through those once.
-
-## Status (previous): root cause found and fixed (needs a real-world confirmation run)
-
-The Windows GUI (`gui/VertexProxyGui.ps1`) failed to launch: double-clicking
-`vertex-openai-proxy-GUI-run.bat` showed a console window that opened and
-closed almost instantly, no GUI window ever appeared, and `gui\crash.log`
-was never created.
-
-### Root cause
-`gui/VertexProxyGui.ps1` was saved as UTF-8 **without a BOM**, and it
-contained Korean UI strings. Windows PowerShell 5.1 (`powershell.exe`, not
-`pwsh.exe`) does not assume UTF-8 for a BOM-less script — it falls back to
-the system's legacy codepage (e.g. CP949 on a Korean Windows install). That
-misreads the Korean multi-byte sequences as garbage bytes, one of which
-happened to decode as a literal `'` (single quote), which prematurely closed
-a string and cascaded into a chain of parse errors throughout the rest of
-the file — e.g. `Unexpected token 'Collapsed"` and `Missing closing '}'`
-several hundred lines away from the actual problem.
-
-Critically, this is a **parse-time** failure: it happens before the script
-body executes a single statement, so no in-script error handling (the
-`trap` block, `Write-CrashLog`) can ever catch it — explaining why
-`crash.log` was never written no matter how early that logic was moved.
-
-This is the exact same class of bug this repo hit earlier with
-`install-windows.ps1` and with `.env` (see below) — Windows PowerShell 5.1
-+ non-ASCII text + missing/wrong BOM is a recurring trap in this codebase.
-
-### Fix applied
-Two changes, both committed:
-1. Added a UTF-8 BOM to `gui/VertexProxyGui.ps1` (byte-level fix, makes
-   PowerShell 5.1 correctly detect UTF-8 regardless of content).
-2. **Translated all UI strings, message boxes, and log lines in
-   `gui/VertexProxyGui.ps1` from Korean to English**, at the user's explicit
-   request — this is published on a public GitHub repo, so English is the
-   right default, and it also makes the encoding class of bug structurally
-   impossible for this file going forward (pure ASCII has no
-   codepage-misinterpretation risk).
-
-`install-windows.ps1` already has a BOM (fixed earlier, see git history).
-`.env` is the **opposite** case: it must NOT have a BOM (a BOM there breaks
-plain-`utf-8` readers that don't expect one), so it's written with explicit
-`UTF8Encoding($false)`. Two different files, two different rules — don't
-conflate them if editing either again.
-
-### Verify
-```powershell
-git pull
-powershell -ExecutionPolicy Bypass -File gui\VertexProxyGui.ps1
-```
-Should now show the WPF window with no parse errors. If something is still
-wrong, it will be a *different* bug than the one described above — check
-`gui\crash.log` (should now actually get written on any runtime error) and
-`gui\launch-stdout.log` / `gui\launch-stderr.log` (written by
-`vertex-openai-proxy-GUI-run.bat` and by `install-windows.ps1`'s own
-"open it now?" prompt).
-
-### Architecture notes (for future changes to this file)
 - Pure **PowerShell + WPF** (`Add-Type -AssemblyName PresentationFramework`,
-  XAML loaded via `[Windows.Markup.XamlReader]::Load`), not Python — two
-  earlier attempts (CustomTkinter, then pywebview) hit environment-specific
-  dependency problems that were painful to diagnose without a Windows
-  machine to test on. WPF ships with Windows itself.
-- Reference implementation for this pattern: `nicekriss/Sage-and-Triton-one-shot`
-  on GitHub (a ComfyUI installer GUI using the same approach).
-- Node server process management: `Start-Process` with
-  `-RedirectStandardOutput`/`-RedirectStandardError` to temp log files,
-  polled by a `DispatcherTimer` (file reads never block, unlike reading a
-  live process pipe directly).
+  XAML loaded via `[Windows.Markup.XamlReader]::Load`). Chosen after two
+  Python-based GUI attempts (CustomTkinter, then pywebview) both hit
+  environment-specific dependency problems that were painful to diagnose
+  without a Windows machine to test on.
+- Launched via `gui/LaunchHidden.vbs` (`WScript.Shell.Run`), not
+  `powershell.exe -WindowStyle Hidden` directly — on Windows 11 with
+  "Windows Terminal" set as the default terminal app, that OS setting
+  intercepts any new console-subsystem process and force-opens it in a
+  visible tab regardless of window style. `SetCurrentProcessExplicitAppUserModelID`
+  gives the taskbar icon its own identity instead of being grouped under
+  generic "Windows PowerShell".
+- Node server process management: `Start-Process -RedirectStandardOutput/-RedirectStandardError`
+  to temp log files, polled by a `DispatcherTimer` (file reads never block,
+  unlike reading a live process pipe directly). `Stop-NodeServer` polls
+  `Get-NetTCPConnection` until the port actually clears before restarting —
+  don't replace with a fixed sleep, that caused an intermittent EADDRINUSE.
 - Single instance: a named Mutex (`Global\VertexOpenAIProxyGuiMutex`) plus a
-  `.gui-instance.lock` PID file, so a second launch can prompt "terminate
-  the existing one and reopen?" and target the right process.
+  `.gui-instance.lock` PID file. Dispose every non-owning mutex handle
+  immediately on a failed acquire — not doing so was a real bug (the new
+  process ended up holding the old mutex alive, permanently wedging future
+  launches).
 - WPF `Brush` properties (`.Fill`, `.Background`) cannot be assigned a raw
   string reliably from PowerShell — use the `ConvertTo-Brush` helper
   (wraps `System.Windows.Media.BrushConverter`).
 - The XAML is a PowerShell verbatim here-string (`@'...'@`); both the
   opening `@'` and closing `'@` must be alone on their own line with no
   trailing whitespace.
-- Keep all strings in this file (and any new PowerShell script with
-  non-ASCII content) either pure ASCII, or double-check the file has a
-  UTF-8 BOM — Windows PowerShell 5.1 is the target runtime and has no
-  other way to detect the encoding.
+- **Encoding is load-bearing**: `gui/VertexProxyGui.ps1` must keep its UTF-8
+  BOM (Windows PowerShell 5.1 misreads a BOM-less file with non-ASCII
+  content via the system codepage, corrupting string literals into
+  cascading parse errors with no visible cause) — and all its UI/log
+  strings are plain ASCII/English on top of that, removing the risk
+  entirely rather than just patching one instance of it. `.env` is the
+  **opposite** case — it must NOT have a BOM — so don't copy either file's
+  encoding handling onto the other.
+- Log-file/log-panel: node's stdout/stderr go to per-launch **timestamped**
+  filenames (`gui/LaunchHidden.vbs`), not a fixed pair — a locked leftover
+  log file (AV/EDR scanning, a lingering handle) made `cmd.exe`'s own
+  `1> file` redirection fail to even open it, silently preventing
+  `powershell.exe` (the whole GUI) from launching at all.
+- Fallback Gemini model list uses `gemini-3.1-pro-preview`, not
+  `gemini-3.1-pro` (the latter 404s against Vertex AI).
+
+Full blow-by-blow of every bug found and fixed is in `git log` for this file
+and `install-windows.ps1` if you need the detailed history.
