@@ -210,7 +210,14 @@ class ProxyGuiApp:
         except Exception:
             self.root.configure(bg=BEIGE)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
-        self.root.bind("<Unmap>", self._on_unmap)
+        # NOTE: <Unmap> is bound later (after the window has actually been
+        # shown once) — see _arm_unmap_handler(). CTk's startup sequence can
+        # briefly report state()=="iconic" while it's still negotiating with
+        # the window manager, and binding this immediately made the window
+        # hide itself to the tray before the user ever saw it (process stays
+        # alive, mainloop keeps running, but no window and no obvious tray
+        # icon — looks exactly like "it silently died").
+        self._unmap_armed = False
 
         self.proc = None
         self.log_queue = queue.Queue()
@@ -219,15 +226,29 @@ class ProxyGuiApp:
         self._build_ui()
         self._load_env_into_fields()
 
-        # Size the window to fit its content exactly (no leftover margin),
-        # instead of a guessed fixed geometry.
-        self.root.update_idletasks()
-        width = self.root.winfo_reqwidth()
-        height = self.root.winfo_reqheight()
-        self.root.geometry(f"{width}x{height}")
-        self.root.minsize(width, 360)
+        # Size the window to fit its content, with a sane floor in case CTk's
+        # requested size isn't settled yet, and force it to the foreground —
+        # belt-and-braces against the window ending up invisible/off-screen.
+        self.root.update()
+        width = max(self.root.winfo_reqwidth(), 700)
+        height = max(self.root.winfo_reqheight(), 520)
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x = max((screen_w - width) // 2, 0)
+        y = max((screen_h - height) // 2, 0)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.minsize(min(width, 700), 360)
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after(300, lambda: self.root.attributes("-topmost", False))
+        self.root.after(500, self._arm_unmap_handler)
 
         self.root.after(100, self._poll_log_queue)
+
+    def _arm_unmap_handler(self):
+        self._unmap_armed = True
+        self.root.bind("<Unmap>", self._on_unmap)
 
     # -- UI ----------------------------------------------------------------
     def _build_ui(self):
@@ -488,7 +509,7 @@ class ProxyGuiApp:
         return img
 
     def _on_unmap(self, _event):
-        if self.root.state() == "iconic":
+        if self._unmap_armed and self.root.state() == "iconic":
             self.hide_to_tray()
 
     def hide_to_tray(self):
