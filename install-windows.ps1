@@ -14,11 +14,11 @@
 $ErrorActionPreference = "Stop"
 # PowerShell 7.3+ turns any stderr output from an external program (gcloud, npm, ...)
 # into a terminating error when $ErrorActionPreference is "Stop", even if the program
-# exited successfully. gcloud prints informational warnings to stderr routinely, so
-# disable that behavior and check $LASTEXITCODE ourselves where it matters.
-if (Test-Path variable:global:PSNativeCommandUseErrorActionPreference) {
-    $PSNativeCommandUseErrorActionPreference = $false
-}
+# exited successfully. gcloud prints informational warnings/notices to stderr
+# routinely, so disable that behavior globally and check $LASTEXITCODE ourselves
+# where it matters. On PowerShell 5.1 this variable doesn't exist and simply has
+# no effect, which is harmless.
+$PSNativeCommandUseErrorActionPreference = $false
 Set-Location -Path $PSScriptRoot
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Green }
