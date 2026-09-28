@@ -1,6 +1,41 @@
 # Vertex OpenAI Proxy — GUI debugging history
 
-## Status: root cause found and fixed (needs a real-world confirmation run)
+## Status: launch fixed and verified; Start/Stop/Restart now verified working end-to-end
+
+The BOM/encoding fix below made the GUI launch. A second, separate bug was
+then found and fixed: **"Start" silently did nothing on a machine where
+Node.js is installed but not on the current process's PATH** (e.g. installed
+via winget/nvm after Explorer.exe's environment was last refreshed — a
+common Windows gotcha). `Start-NodeServer` used to call `Get-Command node`
+with no fallback, so on such a machine it always failed to find node —
+and depending on how it's invoked, could fail *silently* (no dialog, no log
+line) because `[System.Windows.MessageBox]::Show(...)` calls from inside a
+button-click handler are unreliable when the click itself was delivered via
+UI Automation's `InvokePattern.Invoke()` (as opposed to a real physical
+mouse click) — a Windows UIA reentrancy quirk, confirmed while testing this
+headlessly. Two fixes, both committed:
+1. Added `Find-NodeExe` (falls back to `%ProgramFiles%\nodejs\node.exe`,
+   `%ProgramFiles(x86)%\nodejs\node.exe`, `%LOCALAPPDATA%\Programs\nodejs\node.exe`,
+   and any `%APPDATA%\nvm\<version>\node.exe`) before giving up.
+2. Every failure path in `Start-NodeServer` / `Sync-EnvIfChanged` /
+   `SaveButton` now also calls `Append-LogLine` (not just a MessageBox), so
+   a failure is never invisible even if the MessageBox itself doesn't render
+   for some reason.
+
+Verified locally (real Node process started, `/health` responded 200, Stop
+actually killed the process, Restart worked, changing the Model dropdown
+and clicking Restart correctly rewrote `.env` with no duplicate lines, "Save
+& Restart" correctly blocked and logged a warning on an empty Project ID
+without touching the running server). The mask toggle and log-panel
+collapse/expand were also verified working. The tray icon's own context
+menu (right-click items, double-click-to-restore) and the duplicate-instance
+prompt could not be fully re-verified after this last round of fixes — they
+rely on real OS-level mouse clicks / the system tray, which isn't something
+that can be driven safely from this side without risking clicks landing on
+unrelated windows on the user's live desktop. Recommend the user manually
+click through those once.
+
+## Status (previous): root cause found and fixed (needs a real-world confirmation run)
 
 The Windows GUI (`gui/VertexProxyGui.ps1`) failed to launch: double-clicking
 `vertex-openai-proxy-GUI-run.bat` showed a console window that opened and

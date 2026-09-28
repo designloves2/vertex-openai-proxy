@@ -426,6 +426,7 @@ function Sync-EnvIfChanged {
     $current = Read-EnvValues
     $formValues = Get-FormValues
     if ([string]::IsNullOrWhiteSpace($formValues.GOOGLE_CLOUD_PROJECT_ID)) {
+        Append-LogLine "ERROR: Please enter a Project ID."
         [System.Windows.MessageBox]::Show("Please enter a Project ID.", "Required", "OK", "Warning") | Out-Null
         return $false
     }
@@ -438,6 +439,33 @@ function Sync-EnvIfChanged {
     return $true
 }
 
+function Find-NodeExe {
+    # Get-Command relies on this process's PATH, which can be stale if Node.js
+    # was installed (via winget/nvm) after the launching process (e.g. the
+    # user's Explorer.exe session) last refreshed its environment block —
+    # a common Windows gotcha where a fresh install is invisible to
+    # already-running processes until logoff/logon. Fall back to the
+    # well-known install locations before giving up.
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($nodeCmd) { return $nodeCmd.Source }
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "nodejs\node.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe")
+    )
+    $nvmDir = Join-Path $env:APPDATA "nvm"
+    if (Test-Path -LiteralPath $nvmDir) {
+        $symlink = Join-Path $nvmDir "node.exe"
+        if (Test-Path -LiteralPath $symlink) { $candidates += $symlink }
+        $candidates += (Get-ChildItem -LiteralPath $nvmDir -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName "node.exe" })
+    }
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    return $null
+}
+
 function Start-NodeServer {
     if ($script:NodeProcess -and -not $script:NodeProcess.HasExited) {
         Append-LogLine "Already running."
@@ -445,8 +473,9 @@ function Start-NodeServer {
     }
     if (-not (Sync-EnvIfChanged)) { return }
 
-    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-    if (-not $nodeCmd) {
+    $nodeExe = Find-NodeExe
+    if (-not $nodeExe) {
+        Append-LogLine "ERROR: Could not find the node executable. Please make sure Node.js is installed."
         [System.Windows.MessageBox]::Show("Could not find the node executable. Please make sure Node.js is installed.", "Error", "OK", "Error") | Out-Null
         return
     }
@@ -458,10 +487,11 @@ function Start-NodeServer {
     $script:StderrOffset = 0
 
     try {
-        $proc = Start-Process -FilePath $nodeCmd.Source -ArgumentList "index.js" `
+        $proc = Start-Process -FilePath $nodeExe -ArgumentList "index.js" `
             -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput $script:StdoutPath -RedirectStandardError $script:StderrPath
     } catch {
+        Append-LogLine "ERROR: Failed to start server: $($_.Exception.Message)"
         [System.Windows.MessageBox]::Show("Failed to start server: $($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
         return
     }
@@ -534,6 +564,7 @@ $RestartButton.Add_Click({ Restart-NodeServer })
 $SaveButton.Add_Click({
     $formValues = Get-FormValues
     if ([string]::IsNullOrWhiteSpace($formValues.GOOGLE_CLOUD_PROJECT_ID)) {
+        Append-LogLine "ERROR: Please enter a Project ID."
         [System.Windows.MessageBox]::Show("Please enter a Project ID.", "Required", "OK", "Warning") | Out-Null
         return
     }
