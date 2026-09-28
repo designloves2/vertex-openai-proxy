@@ -12,6 +12,13 @@
 #>
 
 $ErrorActionPreference = "Stop"
+# PowerShell 7.3+ turns any stderr output from an external program (gcloud, npm, ...)
+# into a terminating error when $ErrorActionPreference is "Stop", even if the program
+# exited successfully. gcloud prints informational warnings to stderr routinely, so
+# disable that behavior and check $LASTEXITCODE ourselves where it matters.
+if (Test-Path variable:global:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 Set-Location -Path $PSScriptRoot
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Green }
@@ -123,32 +130,32 @@ Write-Host "브라우저 창이 열립니다. Google 계정으로 로그인 후 
 gcloud auth application-default login
 
 Write-Host "gcloud 기본 프로젝트를 $ProjectIdValue 로 설정합니다..."
-gcloud config set project "$ProjectIdValue" | Out-Null
-try {
-    gcloud auth application-default set-quota-project "$ProjectIdValue" | Out-Null
-} catch {
+gcloud config set project "$ProjectIdValue" 2>&1 | Out-Null
+
+gcloud auth application-default set-quota-project "$ProjectIdValue" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
     Warn "quota project 설정에 실패했습니다. 계속 진행합니다."
 }
 
 Write-Host "Vertex AI User 권한(roles/aiplatform.user)을 확인/부여합니다..."
 $CurrentAccount = gcloud config get-value account 2>$null
 if (-not [string]::IsNullOrWhiteSpace($CurrentAccount)) {
-    try {
-        gcloud projects add-iam-policy-binding "$ProjectIdValue" `
-            --member="user:$CurrentAccount" `
-            --role="roles/aiplatform.user" `
-            --condition=None | Out-Null
+    gcloud projects add-iam-policy-binding "$ProjectIdValue" `
+        --member="user:$CurrentAccount" `
+        --role="roles/aiplatform.user" `
+        --condition=None 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
         Write-Host "권한 부여 완료 ($CurrentAccount)"
-    } catch {
+    } else {
         Warn "권한 부여에 실패했습니다. 이미 권한이 있거나, 소유자 권한이 없는 프로젝트일 수 있습니다. 필요하면 프로젝트 관리자에게 요청하세요."
     }
 }
 
 Write-Host "Vertex AI API를 활성화합니다 (aiplatform.googleapis.com)..."
-try {
-    gcloud services enable aiplatform.googleapis.com --project "$ProjectIdValue" | Out-Null
+gcloud services enable aiplatform.googleapis.com --project "$ProjectIdValue" 2>&1 | Out-Null
+if ($LASTEXITCODE -eq 0) {
     Write-Host "API 활성화 완료"
-} catch {
+} else {
     Warn "API 활성화에 실패했습니다. Google Cloud Console에서 직접 활성화해주세요: https://console.cloud.google.com/apis/library/aiplatform.googleapis.com"
 }
 
