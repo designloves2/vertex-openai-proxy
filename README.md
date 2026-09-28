@@ -44,6 +44,8 @@ chmod +x install-mac.sh
 ```
 The installer generates **`vertex-openai-proxy-run.sh`** (`chmod +x` already applied) so you can start the server later without remembering `npm run start`.
 
+> A prebuilt macOS app is also available on the [Releases page](https://github.com/designloves2/vertex-openai-proxy/releases/tag/macos) if you'd rather not run the installer script yourself.
+
 ### Manual setup
 
 1. Clone the repository and install dependencies:
