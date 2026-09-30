@@ -116,16 +116,35 @@ Both fixes are already merged to `main` (commits `825db10`, `42228a2`).
 
 ## Note for the macOS app (built separately in Xcode/Swift)
 
-The macOS control panel is a **separate native Swift/Xcode app**, built
-independently from the Windows PowerShell+WPF GUI in this repo — it is not
-expected to read or reuse any GUI code from here. However, it still runs
-this repo's **`index.js` as its backend Node server** (same as
-`install-mac.sh` sets up), so the two `index.js` fixes above (tool_call
-`arguments` JSON.parse crash, HTTP response chunk buffering) apply directly
-to it as well.
+The macOS app is a **fully separate native Swift/Xcode build** — it does not
+run this repo's `index.js` at all, and does not reuse any code from here. It
+has its own independent reimplementation of the OpenAI-to-Vertex proxy logic
+in Swift.
 
-**Action needed:** none on the Swift/Xcode side. Just make sure the copy of
-`index.js` the macOS app ships/bundles/points at is updated to this repo's
-current `main` (`git pull` if it runs from a cloned copy, or re-bundle
-`index.js` if it packages its own copy into the app). No Swift code changes
-are required — the fix is entirely inside `index.js`.
+**This means the `index.js` fixes above do NOT carry over automatically.**
+They were bug fixes in this repo's specific code, not in `index.js` alone as
+a file to copy — the macOS Swift codebase needs the *same two bugs* checked
+for and fixed independently in its own logic, if equivalent code exists there:
+
+1. **Unguarded JSON.parse on assistant `tool_calls[].function.arguments`
+   when replaying a prior assistant turn back to the model.** If the Swift
+   code has an equivalent step (decoding a stored/replayed tool-call's
+   arguments string before sending it to Gemini) and that decode isn't
+   wrapped in error handling, a malformed/partial arguments string (more
+   likely to occur with many tools in flight) will throw and can surface as
+   a raw parser-error message in the API response, exactly like the bug
+   fixed here. Fix: catch the decode failure and fall back to an empty
+   object instead of propagating the raw error.
+2. **Buffering an HTTP(S) response body by appending raw bytes/chunks
+   directly to a string one piece at a time**, instead of accumulating the
+   raw bytes fully and decoding once at the end. If done per-chunk, a
+   multi-byte UTF-8 character split across a chunk boundary can get
+   corrupted. (Not necessarily a Swift-idiomatic risk the same way — depends
+   on which HTTP/URLSession APIs and string-decoding calls are used — but
+   worth a quick check of how the Swift code reads Vertex AI's response body.)
+
+**Action needed:** someone (or a local/Mac Claude session) needs to read
+through the Swift proxy code's tool-call-argument handling and HTTP
+response-reading code and check whether either of these two patterns exists
+there, then apply an equivalent fix in Swift. This can't be done from this
+cloud session — no Xcode/Swift code exists in this repository to inspect.
