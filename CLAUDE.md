@@ -66,3 +66,52 @@ app) to chase. **Don't re-attempt this without the user explicitly asking.**
 
 Full blow-by-blow of every bug found and fixed is in `git log` for this file
 and `install-windows.ps1` if you need the detailed history.
+
+# Node proxy (`index.js`) — 500 error with large `tools` arrays
+
+## Status: fixed, user-confirmed via a 96-tool request test
+
+## Symptom
+`POST /v1/chat/completions` returned HTTP 500 with
+`{"error":{"message":"Unexpected non-whitespace character after JSON at
+position 30 (line 1 column 31)","type":"api_error"}}` specifically when the
+request's `tools` array was large (~96 entries from a client sending many
+function definitions at once). 0–3 tools always worked.
+
+## Root cause
+Line ~672, inside `openAiMessagesToGeminiContents()`, when replaying an
+assistant `tool_calls` turn back to Gemini:
+```js
+const funcArgs = typeof tc.function.arguments === 'string'
+    ? JSON.parse(tc.function.arguments || '{}')
+    : tc.function.arguments;
+```
+This `JSON.parse` had no try/catch, unlike the near-identical tool-response
+parsing a few lines below it (~line 706) which already falls back safely on
+a parse failure. With a large number of tools in play, a malformed/partial
+`arguments` string from the client is far more likely to occur, and when it
+did, the raw `SyntaxError` propagated uncaught all the way to the route's
+top-level `catch`, which puts `error.message` directly into the client-facing
+JSON body — hence the client seeing a raw V8 JSON-parser error string
+instead of a normal API error.
+
+## Fix
+Wrapped that `JSON.parse` in the same try/catch pattern as the tool-response
+parser, falling back to `{}` on failure instead of throwing.
+
+## Also fixed (found during investigation, real bug but not the actual
+## trigger here — the exercised streaming path was already protected)
+`callGeminiAPI()`, `_doCallGeminiAPI()`, and the legacy `/chat` endpoint
+accumulated the HTTPS response body with `data += chunk` — concatenating raw
+`Buffer` chunks onto a string one piece at a time. This can corrupt a
+multi-byte UTF-8 character if it's split across a chunk boundary (Node
+converts each `Buffer` piece independently with the default encoding). Fixed
+by collecting chunks into an array and doing a single `Buffer.concat(...).
+toString('utf8')` after `'end'`. Note: the actual `/v1/chat/completions`
+streaming path was already safe because it calls `proxyRes.setEncoding
+('utf8')`, which makes Node decode multi-byte sequences correctly across
+chunks internally — only the non-streaming call sites lacked that.
+
+Both fixes are already merged to `main` (commit `825db10`) — no action
+needed for the macOS build unless it maintains its own fork/copy of
+`index.js`.
