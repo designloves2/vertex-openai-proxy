@@ -112,6 +112,20 @@ streaming path was already safe because it calls `proxyRes.setEncoding
 ('utf8')`, which makes Node decode multi-byte sequences correctly across
 chunks internally — only the non-streaming call sites lacked that.
 
-Both fixes are already merged to `main` (commit `825db10`) — no action
-needed for the macOS build unless it maintains its own fork/copy of
-`index.js`.
+Both fixes are already merged to `main` (commits `825db10`, `42228a2`).
+
+## Note for the macOS app (built separately in Xcode/Swift)
+
+The macOS control panel is a **separate native Swift/Xcode app**, built
+independently from the Windows PowerShell+WPF GUI in this repo — it is not
+expected to read or reuse any GUI code from here. However, it still runs
+this repo's **`index.js` as its backend Node server** (same as
+`install-mac.sh` sets up), so the two `index.js` fixes above (tool_call
+`arguments` JSON.parse crash, HTTP response chunk buffering) apply directly
+to it as well.
+
+**Action needed:** none on the Swift/Xcode side. Just make sure the copy of
+`index.js` the macOS app ships/bundles/points at is updated to this repo's
+current `main` (`git pull` if it runs from a cloned copy, or re-bundle
+`index.js` if it packages its own copy into the app). No Swift code changes
+are required — the fix is entirely inside `index.js`.
