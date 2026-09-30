@@ -226,9 +226,10 @@ async function callGeminiAPI(baseRequestBody, stream = false, customModelId = nu
         };
 
         const proxyReq = https.request(options, (proxyRes) => {
-            let data = '';
-            proxyRes.on('data', chunk => data += chunk);
+            const chunks = [];
+            proxyRes.on('data', chunk => chunks.push(chunk));
             proxyRes.on('end', () => {
+                const data = Buffer.concat(chunks).toString('utf8');
                 if (proxyRes.statusCode === 401) {
                     // Token expired or revoked
                     reject(new Error('401_UNAUTHORIZED'));
@@ -289,9 +290,10 @@ async function _doCallGeminiAPI(baseRequestBody, stream, targetModel, targetLoca
         };
 
         const proxyReq = https.request(options, (proxyRes) => {
-            let data = '';
-            proxyRes.on('data', chunk => data += chunk);
+            const chunks = [];
+            proxyRes.on('data', chunk => chunks.push(chunk));
             proxyRes.on('end', () => {
+                const data = Buffer.concat(chunks).toString('utf8');
                 if (proxyRes.statusCode === 401) {
                     reject(new Error('401_UNAUTHORIZED'));
                     return;
@@ -393,9 +395,10 @@ app.post('/chat', async (req, res) => {
             };
 
             const proxyReq = https.request(options, (proxyRes) => {
-                let data = '';
-                proxyRes.on('data', chunk => data += chunk);
+                const chunks = [];
+                proxyRes.on('data', chunk => chunks.push(chunk));
                 proxyRes.on('end', () => {
+                    const data = Buffer.concat(chunks).toString('utf8');
                     try {
                         const parsed = JSON.parse(data);
                         resolve(parsed);
@@ -669,7 +672,13 @@ async function openAiMessagesToGeminiContents(messages) {
             if (msg.tool_calls && msg.tool_calls.length > 0) {
                 for (const tc of msg.tool_calls) {
                     const funcName = tc.function.name;
-                    const funcArgs = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments || '{}') : tc.function.arguments;
+                    let funcArgs;
+                    try {
+                        funcArgs = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments || '{}') : tc.function.arguments;
+                    } catch (e) {
+                        console.warn(`[V1/CHAT] Failed to parse tool_call arguments for ${funcName}:`, e.message);
+                        funcArgs = {};
+                    }
                     // RESTORE: Look up the signature from our internal toolCallData Map
                     const stored = toolCallData.get(tc.id) || {};
                     const fallbackSignature =
