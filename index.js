@@ -48,6 +48,7 @@ class LRUCache {
 const toolCallData = new LRUCache(1000); // Stores { name: string, signature?: string }
 const toolSignatureByName = new Map(); // Fallback when the OpenAI client changes tool-call IDs
 let latestThoughtSignature = null;
+const SKIP_THOUGHT_SIGNATURE_VALIDATOR = 'skip_thought_signature_validator';
 
 // --- HELPER: SMART LOGGING (PREVENTS EVENT LOOP FREEZES) ---
 function smartTruncate(obj, limit = 1000) {
@@ -625,6 +626,7 @@ async function openAiMessagesToGeminiContents(messages) {
     let imageUrlsSeen = 0;
     let imageUrlsEmbedded = 0;
     let inlinedImagesInPayload = false;
+    let signatureFallbackCount = 0;
 
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
@@ -688,11 +690,15 @@ async function openAiMessagesToGeminiContents(messages) {
 
                     const callPart = { functionCall: { name: funcName, args: funcArgs } };
 
-                    // Gemini 3 requires the signature on the original functionCall part.
+                    // Gemini 3 requires a signature on every replayed functionCall part. When we
+                    // can't restore the real one (server restarted and lost the in-memory cache,
+                    // history came from another model/client, tool-call ids changed), Google's
+                    // documented escape hatch is this dummy value; without it the request 400s.
                     if (fallbackSignature) {
                         callPart.thought_signature = fallbackSignature;
                     } else {
-                        console.warn(`[V1/CHAT] Missing thought signature for tool call: ${funcName} (${tc.id})`);
+                        callPart.thought_signature = SKIP_THOUGHT_SIGNATURE_VALIDATOR;
+                        signatureFallbackCount++;
                     }
 
                     parts.push(callPart);
@@ -730,6 +736,10 @@ async function openAiMessagesToGeminiContents(messages) {
                 // We keep the signature in memory to help the next tool-leg if needed.
             }
         }
+    }
+
+    if (signatureFallbackCount > 0) {
+        console.warn(`[V1/CHAT] ${signatureFallbackCount} replayed tool call(s) had no stored thought signature; using skip_thought_signature_validator.`);
     }
 
     if (imageUrlsSeen > imageUrlsEmbedded) {
