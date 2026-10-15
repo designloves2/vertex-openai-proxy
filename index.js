@@ -719,7 +719,7 @@ async function openAiMessagesToGeminiContents(messages) {
             let parsedResponse;
             try {
                 parsedResponse = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content;
-                if (typeof parsedResponse !== 'object' || parsedResponse === null) parsedResponse = { result: parsedResponse };
+                if (typeof parsedResponse !== 'object' || parsedResponse === null || Array.isArray(parsedResponse)) parsedResponse = { result: parsedResponse };
             } catch (e) {
                 parsedResponse = { result: msg.content };
             }
