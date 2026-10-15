@@ -915,7 +915,8 @@ app.post('/v1/chat/completions', async (req, res) => {
                         }
                         if ((proxyRes.statusCode === 429 || proxyRes.statusCode >= 500) && transientRetryCount < MAX_TRANSIENT_RETRIES) {
                             const nextRetryCount = transientRetryCount + 1;
-                            const delayMs = 1000 * Math.pow(2, transientRetryCount); // 1s, 2s, 4s
+                            const RETRY_DELAYS_MS = [2000, 3000, 5000];
+                            const delayMs = RETRY_DELAYS_MS[transientRetryCount]; // 2s, 3s, 5s
                             console.warn(`[V1/STREAM] Gemini HTTP ${proxyRes.statusCode} (attempt ${nextRetryCount}/${MAX_TRANSIENT_RETRIES}). Retrying in ${delayMs}ms...`);
                             setTimeout(() => {
                                 sendStreamRequest(isRetryAfterAuthRefresh, nextRetryCount).catch((retryErr) => {
