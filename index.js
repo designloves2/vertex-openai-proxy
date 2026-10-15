@@ -874,7 +874,8 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         if (stream) {
             // ===== STREAMING RESPONSE =====
-            const sendStreamRequest = async (isRetryAfterAuthRefresh = false) => {
+            const MAX_TRANSIENT_RETRIES = 3;
+            const sendStreamRequest = async (isRetryAfterAuthRefresh = false, transientRetryCount = 0) => {
             const accessToken = await getAccessToken(isRetryAfterAuthRefresh);
             const apiEndpoint = 'aiplatform.googleapis.com';
             const apiPath = `/v1/projects/${PROJECT_ID}/locations/${LOCATION_TO_USE}/publishers/google/models/${MODEL_ID_TO_USE}:streamGenerateContent?alt=sse`;
@@ -910,6 +911,21 @@ app.post('/v1/chat/completions', async (req, res) => {
                                     safeEnd(res, `data: ${JSON.stringify({ error: { message: retryErr.message } })}\n\n`);
                                 }
                             }
+                            return;
+                        }
+                        if ((proxyRes.statusCode === 429 || proxyRes.statusCode >= 500) && transientRetryCount < MAX_TRANSIENT_RETRIES) {
+                            const nextRetryCount = transientRetryCount + 1;
+                            const delayMs = 1000 * Math.pow(2, transientRetryCount); // 1s, 2s, 4s
+                            console.warn(`[V1/STREAM] Gemini HTTP ${proxyRes.statusCode} (attempt ${nextRetryCount}/${MAX_TRANSIENT_RETRIES}). Retrying in ${delayMs}ms...`);
+                            setTimeout(() => {
+                                sendStreamRequest(isRetryAfterAuthRefresh, nextRetryCount).catch((retryErr) => {
+                                    if (!res.headersSent) {
+                                        res.status(500).json({ error: { message: retryErr.message, type: 'api_error' } });
+                                    } else {
+                                        safeEnd(res, `data: ${JSON.stringify({ error: { message: retryErr.message } })}\n\n`);
+                                    }
+                                });
+                            }, delayMs);
                             return;
                         }
                         console.error('[V1/STREAM] Gemini HTTP error:', proxyRes.statusCode, errBody.substring(0, 2000));
