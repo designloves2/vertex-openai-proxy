@@ -874,7 +874,8 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         if (stream) {
             // ===== STREAMING RESPONSE =====
-            const accessToken = await getAccessToken();
+            const sendStreamRequest = async (isRetryAfterAuthRefresh = false) => {
+            const accessToken = await getAccessToken(isRetryAfterAuthRefresh);
             const apiEndpoint = 'aiplatform.googleapis.com';
             const apiPath = `/v1/projects/${PROJECT_ID}/locations/${LOCATION_TO_USE}/publishers/google/models/${MODEL_ID_TO_USE}:streamGenerateContent?alt=sse`;
             const postData = JSON.stringify(baseRequestBody);
@@ -897,7 +898,20 @@ app.post('/v1/chat/completions', async (req, res) => {
                     let errBody = '';
                     proxyRes.setEncoding('utf8');
                     proxyRes.on('data', chunk => errBody += chunk);
-                    proxyRes.on('end', () => {
+                    proxyRes.on('end', async () => {
+                        if (proxyRes.statusCode === 401 && !isRetryAfterAuthRefresh) {
+                            console.log('[V1/STREAM] Token expired (401). Forcing refresh and retrying...');
+                            try {
+                                await sendStreamRequest(true);
+                            } catch (retryErr) {
+                                if (!res.headersSent) {
+                                    res.status(500).json({ error: { message: retryErr.message, type: 'api_error' } });
+                                } else {
+                                    safeEnd(res, `data: ${JSON.stringify({ error: { message: retryErr.message } })}\n\n`);
+                                }
+                            }
+                            return;
+                        }
                         console.error('[V1/STREAM] Gemini HTTP error:', proxyRes.statusCode, errBody.substring(0, 2000));
                         if (!res.headersSent) {
                             res.status(proxyRes.statusCode).json({
@@ -1108,6 +1122,9 @@ app.post('/v1/chat/completions', async (req, res) => {
 
             proxyReq.write(postData);
             proxyReq.end();
+            };
+
+            await sendStreamRequest(false);
 
         } else {
             // ===== NON-STREAMING RESPONSE =====
