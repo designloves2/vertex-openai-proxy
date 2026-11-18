@@ -1,0 +1,16 @@
+[package]
+name = "vertex-proxy-gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+native-windows-gui = { version = "1.0.13", features = ["all"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_Shell"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+[build-dependencies]
+embed-resource = "2.5"

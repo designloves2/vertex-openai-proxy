@@ -51,3 +51,8 @@ debug_logs/
 *.zip
 image.png
 nul
+
+gui-rs/target/
+dist/
+.gui-rs-settings
+.gui-command
