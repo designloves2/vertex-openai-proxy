@@ -7,16 +7,34 @@ ships with Windows). Launches with no console window, Start/Stop/Restart/
 Save & Restart all work against a real node process, `.env` autosave works,
 field masking works, the log panel resizes with the window.
 
-**System tray: intentionally not pursued further.** Closing the window (X)
-drops it to a taskbar icon rather than the notification-area tray icon near
-the clock. The taskbar icon's right-click Jump List (Open / Restart Server /
-Quit, via `gui/SendCommand.vbs` + a `.gui-command` file the app polls) works
-correctly and the process stays alive — functionally equivalent to a real
-tray icon, just a different location. Multiple attempts to get a real
-`System.Windows.Forms.NotifyIcon` to actually place an icon (rather than
-just flip `.Visible`) failed under WPF's `ShowDialog()` message loop; the
-user has decided this isn't worth a full rewrite (e.g. a compiled C#/.NET
-app) to chase. **Don't re-attempt this without the user explicitly asking.**
+**System tray: solved by the Rust rewrite (`gui-rs/`), not the PowerShell GUI.**
+The PowerShell/WPF GUI can't place a real notification-area icon (a
+`System.Windows.Forms.NotifyIcon` never shows under WPF's `ShowDialog()`
+message loop); closing its window drops to a taskbar icon with a Jump List
+(Open / Restart Server / Quit via `gui/SendCommand.vbs` + a polled
+`.gui-command` file) instead. **Don't try to fix the tray in the PowerShell
+GUI** — the Rust app is the tray-capable one.
+
+## Rust GUI (`gui-rs/`) — real system tray, portable release
+
+Native Win32 via `native-windows-gui` (Rust only, no C++). Closing the window
+hides it to the tray; tray left-click = open, right-click = Open / Restart
+Server / Quit. Options: "Start with Windows" (`HKCU\...\Run`, launched with
+`--minimized`) and "Auto-start server on launch" (`.gui-rs-settings`).
+
+- **Needs the embedded Common Controls v6 manifest** (`app.manifest` +
+  `app.rc` + `build.rs` via `embed-resource`). Without it the exe fails at
+  startup with "GetWindowSubclass not found" and the window never appears.
+- Project root = nearest ancestor folder of the exe containing `index.js`.
+  `.gui-command` / `.gui-rs-settings` live in that root (not `gui/`). The
+  exe prefers a bundled `node\node.exe` in the root over PATH.
+- `quit()` calls `std::process::exit(0)`; `stop_thread_dispatch` alone left
+  the process alive.
+- Before spawning node it checks the port; a leftover node (e.g. orphaned by
+  killing the old PowerShell GUI) holding it otherwise caused EADDRINUSE.
+- Release: `build-release.ps1` builds and assembles `dist/VertexOpenAIProxy/`
+  (exe + node runtime + server + prod `node_modules`) and a zip; published as
+  GitHub release `windows-v1.0`. `.env` is never included.
 
 ## Architecture notes
 
