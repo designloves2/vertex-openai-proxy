@@ -4,6 +4,16 @@ All notable changes and architectural overhauls to the **Vertex AI to OpenAI Pro
 
 ---
 
+## [2026-11-26] 이미지 모델 지원 + Vertex 전체 모델 목록
+
+- `/v1/models`: Vertex Model Garden API에서 사용 가능한 전체 Google 모델을 실시간 조회 (1시간 캐시, `?refresh=1`, `?type=chat|image|video|embedding|audio` 필터). 각 모델에 `type`/modalities/`image_generation` 표시.
+- 신규 `POST /v1/images/generations` (OpenAI 호환): Imagen(`:predict`) 및 Gemini 이미지 모델(`responseModalities: IMAGE`), 입력 이미지로 편집 지원.
+- `/v1/chat/completions`에서 이미지 모델 선택 시 이미지 생성으로 라우팅, 결과를 markdown data-URI 이미지로 반환 (스트리밍 포함).
+- 버그 수정: `thinkingLevel`을 Gemini 3 모델에만 전송 (gemini-2.5 등에서 400 에러 발생하던 문제).
+- macOS(Swift) 이식용 문서: `docs/macos-swift-image-models-handoff.md`.
+
+---
+
 ## [Major Update] Vertex AI / OpenAI Compatible Proxy Overhaul
 
 ### 1. Google Vertex AI 인증 방식 개선 (Google Cloud ADC 적용)

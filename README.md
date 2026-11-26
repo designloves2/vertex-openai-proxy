@@ -5,7 +5,7 @@ A local proxy that translates OpenAI-format API requests (`/v1/chat/completions`
 This project was inspired by an earlier open-source Vertex-to-OpenAI proxy concept, but the authentication, model routing, streaming parser, tool-calling logic, and installer/GUI have been substantially rewritten. See `CHANGELOG.md` for the full list of changes and [LICENSE](./LICENSE) for licensing terms.
 
 ## 🔥 Features
-- **OpenAI API Compatibility:** Supports `/v1/chat/completions` and `/v1/responses`, both streaming and non-streaming.
+- **OpenAI API Compatibility:** Supports `/v1/chat/completions` and `/v1/responses`, both streaming and non-streaming, plus `/v1/images/generations` (Imagen and Gemini image models). `/v1/models` lists every model Vertex AI exposes (filter with `?type=image` etc.); picking an image model in a chat client returns the generated image inline.
 - **Google ADC Authentication:** Uses `google-auth-library`'s `GoogleAuth` with Application Default Credentials — no OAuth client ID/secret needed. Authenticate once with `gcloud auth application-default login`.
 - **Dynamic Model Routing:** The model requested by the client (e.g. `gemini-3.7-flash`, `gemini-3.1-pro-preview`) is passed through to Vertex AI instead of being overridden by a fixed `.env` value.
 - **Gemini 3.x Flash Tuning:** Detects Gemini 3 Flash models and configures `thinkingConfig` (`thinkingLevel: "high"`) appropriately instead of forcing generic temperature/topP/topK defaults.
