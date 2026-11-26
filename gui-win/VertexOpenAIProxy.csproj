@@ -12,7 +12,7 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>VertexProxy</RootNamespace>
     <AssemblyName>VertexOpenAIProxy</AssemblyName>
-    <Version>2.0.0</Version>
+    <Version>2.1.0</Version>
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>true</EnableMsixTooling>
     <WindowsPackageType>None</WindowsPackageType>

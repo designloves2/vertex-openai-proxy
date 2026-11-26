@@ -117,13 +117,18 @@
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <Grid x:Name="ProjectField" ColumnSpacing="4">
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                     <!-- Hidden by default; the eye toggles it so typos can be checked -->
                                     <PasswordBox x:Name="ProjectBox" Header="Project ID" PasswordRevealMode="Hidden" PlaceholderText="Google Cloud project ID" PasswordChanged="Field_Changed" />
                                     <ToggleButton x:Name="RevealToggle" Grid.Column="1" VerticalAlignment="Bottom" Width="36" Height="33" Padding="0"
                                                   Checked="RevealToggle_Changed" Unchecked="RevealToggle_Changed" ToolTipService.ToolTip="Show / hide project ID" AutomationProperties.Name="Show project ID">
                                         <FontIcon x:Name="RevealIcon" Glyph="&#xE7B3;" FontSize="15" />
                                     </ToggleButton>
+                                    <!-- Pick from the projects the signed-in account can access -->
+                                    <Button x:Name="ProjectPickButton" Grid.Column="2" VerticalAlignment="Bottom" Width="36" Height="33" Padding="0" Click="ProjectPick_Click"
+                                            ToolTipService.ToolTip="Choose from your Google Cloud projects" AutomationProperties.Name="Choose project">
+                                        <FontIcon x:Name="ProjectPickIcon" Glyph="&#xE8FD;" FontSize="15" />
+                                    </Button>
                                 </Grid>
                                 <ComboBox x:Name="LocationBox" Grid.Column="1" Header="Location" IsEditable="True" HorizontalAlignment="Stretch" TextSubmitted="Combo_TextSubmitted" SelectionChanged="Combo_SelectionChanged">
                                     <x:String>global</x:String>
@@ -175,6 +180,35 @@
                             </Button>
                             <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" VerticalAlignment="Center" />
                         </StackPanel>
+
+                        <!-- First run on a new PC: no Google credentials yet -->
+                        <InfoBar x:Name="FirstRunBar" Severity="Warning" IsClosable="False" IsOpen="False" Visibility="Collapsed"
+                                 Title="Google sign-in required"
+                                 Message="This PC has no Google Cloud credentials yet. Sign in once below; the proxy cannot call Vertex AI until then." />
+
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="Google account" Style="{StaticResource CardTitle}" Margin="0" />
+                                <StackPanel Orientation="Horizontal" Spacing="10">
+                                    <FontIcon x:Name="AuthIcon" Glyph="&#xE73E;" FontSize="16" VerticalAlignment="Center" />
+                                    <TextBlock x:Name="AuthStatusText" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" />
+                                </StackPanel>
+                                <TextBlock x:Name="AuthDetailText" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+                                    <Button x:Name="SignInButton" Style="{StaticResource AccentButtonStyle}" Click="SignIn_Click">
+                                        <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE77B;" FontSize="14" /><TextBlock x:Name="SignInText" Text="Sign in with Google" /></StackPanel>
+                                    </Button>
+                                    <Button x:Name="InstallGcloudButton" Click="InstallGcloud_Click" Visibility="Collapsed">
+                                        <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE896;" FontSize="14" /><TextBlock Text="Install Google Cloud CLI" /></StackPanel>
+                                    </Button>
+                                    <Button x:Name="CancelSignInButton" Content="Cancel" Click="CancelSignIn_Click" Visibility="Collapsed" />
+                                    <ProgressRing x:Name="AuthRing" IsActive="False" Width="20" Height="20" />
+                                </StackPanel>
+                                <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
+                                           Text="Sign-in opens your browser (gcloud auth application-default login). Credentials are stored per Windows user, not in .env, so each PC signs in once." />
+                            </StackPanel>
+                        </Border>
 
                         <Border Style="{StaticResource CardStyle}">
                             <StackPanel Spacing="4">

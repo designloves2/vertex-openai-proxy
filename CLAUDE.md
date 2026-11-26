@@ -52,6 +52,21 @@ reference/history.
   `%LOCALAPPDATA%\Microsoft\dotnet` (winget's machine-wide installer stalled on
   a hidden UAC prompt); the system `dotnet` there has only the runtime, so
   `build-release.ps1` checks `dotnet --list-sdks` before falling back to it.
+- **First run / Google sign-in** (`Core/GoogleAuth.cs`, Settings > Google
+  account): no ADC file (and no GOOGLE_APPLICATION_CREDENTIALS key in .env) ->
+  the app opens Settings and runs setup by itself: downloads Google's Cloud CLI
+  installer and runs it **silently per-user** (`/S /singleuser`, no wizard, no
+  UAC), then `gcloud auth application-default login` opens the browser (the
+  user only types ID/password), sets the quota project and restarts the server.
+  The installer ignores a %LOCALAPPDATA% override and always installs into the
+  real per-user folder (a test with fake APPDATA/LOCALAPPDATA reinstalled this
+  PC's gcloud; credentials survived), so FindGcloud checks the shell folder too.
+- **Project picker**: list button next to Project ID lists the account's
+  projects (Cloud Resource Manager v1, token from
+  `gcloud auth application-default print-access-token`). After first sign-in
+  with an empty project ID it auto-fills a single project or opens the list,
+  and saves. MenuFlyout popups are separate windows: PrintWindow does not
+  capture them, use CopyFromScreen for those.
 - Screenshots for checking the UI: `PrintWindow` with flag 2 works on the WinUI
   window even when it is partly off-screen; `CopyFromScreen` does not.
 

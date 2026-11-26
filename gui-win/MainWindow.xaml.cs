@@ -54,7 +54,7 @@ public sealed partial class MainWindow : Window
         Root.SizeChanged += (_, e) => { ApplyLayout(e.NewSize.Width); UpdateTitleBarRegions(); };
         AppTitleBar.Loaded += (_, _) => UpdateTitleBarRegions();
         GearButton.SizeChanged += (_, _) => UpdateTitleBarRegions();
-        Activated += (_, _) => UpdateTitleBarRegions();
+        Activated += (_, _) => { UpdateTitleBarRegions(); if (_authCts == null) RefreshAuth(); };
         AppTitleBar.SizeChanged += (_, _) => UpdateTitleBarRegions();
         AppWindow.Closing += (_, e) =>
         {
@@ -69,6 +69,7 @@ public sealed partial class MainWindow : Window
 
         try { _options.RepointStartupEntry(); } catch { }
         LoadForm();
+        RefreshAuth(firstRun: true);
         UpdateStatus();
         _timer = new DispatcherQueueTimerWrapper(DispatcherQueue, TimeSpan.FromMilliseconds(400), Tick);
 
@@ -411,6 +412,153 @@ public sealed partial class MainWindow : Window
 
     void Gear_Click(object sender, RoutedEventArgs e) => ShowPage(SettingsPage.Visibility != Visibility.Visible);
     void Back_Click(object sender, RoutedEventArgs e) => ShowPage(false);
+
+    // ---------- Google sign-in / first run ----------
+    CancellationTokenSource? _authCts;
+
+    /// <summary>Updates the Google account card. On first run (no credentials) opens Settings.</summary>
+    void RefreshAuth(bool firstRun = false)
+    {
+        var st = GoogleAuth.Check(_paths);
+        var gcloud = GoogleAuth.FindGcloud();
+        var ok = st.State is AuthState.SignedIn or AuthState.ServiceAccountKey;
+        AuthIcon.Glyph = ok ? "" : "";   // check / warning
+        AuthIcon.Foreground = new SolidColorBrush(ok ? Windows.UI.Color.FromArgb(255, 16, 185, 129) : Windows.UI.Color.FromArgb(255, 234, 179, 8));
+        AuthStatusText.Text = st.State switch
+        {
+            AuthState.SignedIn => "Signed in (Application Default Credentials)",
+            AuthState.ServiceAccountKey => "Using a service account key from .env",
+            AuthState.KeyFileMissing => "Service account key file not found",
+            _ => "Not signed in",
+        };
+        AuthDetailText.Text = st.State == AuthState.NotSignedIn && gcloud == null
+            ? "Google Cloud CLI will be installed automatically, then your browser opens for sign-in."
+            : st.Detail;
+        SignInText.Text = st.State == AuthState.SignedIn ? "Sign in again" : gcloud == null ? "Set up and sign in" : "Sign in with Google";
+        SignInButton.IsEnabled = _authCts == null;
+        InstallGcloudButton.Visibility = Visibility.Collapsed; // install is part of the one-click setup
+
+        FirstRunBar.IsOpen = !ok;
+        FirstRunBar.Visibility = ok ? Visibility.Collapsed : Visibility.Visible;
+        if (firstRun && !ok && st.State == AuthState.NotSignedIn)
+        {
+            // New PC: open Settings and run the whole setup; the user only types
+            // their Google ID/password in the browser window that opens.
+            Log("No Google credentials on this PC - starting setup.");
+            ShowWindow();
+            ShowPage(true);
+            DispatcherQueue.TryEnqueue(() => _ = RunSetupAsync());
+        }
+    }
+
+    void SetAuthBusy(bool busy)
+    {
+        AuthRing.IsActive = busy;
+        CancelSignInButton.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        SignInButton.IsEnabled = !busy;
+    }
+
+    void AuthProgress(string text)
+    {
+        Log(text);
+        DispatcherQueue.TryEnqueue(() => AuthDetailText.Text = text);
+    }
+
+    /// <summary>Installs Google Cloud CLI silently if missing, then runs the browser sign-in.</summary>
+    async Task RunSetupAsync()
+    {
+        if (_authCts != null) return;
+        _authCts = new CancellationTokenSource();
+        SetAuthBusy(true);
+        try
+        {
+            var gcloud = GoogleAuth.FindGcloud() ?? await GoogleAuth.InstallGcloudAsync(AuthProgress, _authCts.Token);
+            if (gcloud == null) { AuthProgress("Google Cloud CLI could not be installed. Check your internet connection and try again."); return; }
+            AuthProgress("A browser window is opening - sign in with your Google account there.");
+            var ok = await GoogleAuth.SignInAsync(gcloud, _saved.ProjectId, l => EnqueueLog("[gcloud] " + l), _authCts.Token);
+            Log(ok ? "Google sign-in completed." : "Google sign-in did not complete.");
+            if (ok)
+            {
+                if (_server.IsRunning) await RestartServerAsync(); // server reads credentials at start
+                else if (_options.AutoStartServer) StartServer();
+                // New PC with no project yet: offer the account's projects right away.
+                if (string.IsNullOrWhiteSpace(_saved.ProjectId)) await PickProjectAsync(autoFill: true);
+            }
+        }
+        catch (OperationCanceledException) { Log("Setup cancelled."); }
+        catch (Exception ex) { Log("Setup failed: " + ex.Message); }
+        finally
+        {
+            _authCts = null;
+            SetAuthBusy(false);
+            RefreshAuth();
+        }
+    }
+
+    async void SignIn_Click(object sender, RoutedEventArgs e) => await RunSetupAsync();
+
+    // ---------- project picker ----------
+    bool _projectsLoading;
+
+    async void ProjectPick_Click(object sender, RoutedEventArgs e) => await PickProjectAsync(autoFill: false);
+
+    /// <summary>
+    /// Lists the account's projects and shows them as a menu under the Project ID
+    /// field. autoFill (right after first sign-in): one project -> fill it in silently.
+    /// </summary>
+    async Task PickProjectAsync(bool autoFill)
+    {
+        if (_projectsLoading) return;
+        var gcloud = GoogleAuth.FindGcloud();
+        if (gcloud == null || GoogleAuth.Check(_paths).State != AuthState.SignedIn)
+        {
+            ShowBanner(InfoBarSeverity.Warning, "Sign in first", "Open Settings (gear) and sign in with Google to list your projects.");
+            return;
+        }
+        _projectsLoading = true;
+        ProjectPickButton.IsEnabled = false;
+        try
+        {
+            var projects = await GoogleAuth.ListProjectsAsync(gcloud, CancellationToken.None);
+            if (projects.Count == 0) { ShowBanner(InfoBarSeverity.Warning, "No projects found", "This Google account has no active Google Cloud projects."); return; }
+            if (autoFill && projects.Count == 1) { ApplyProject(projects[0].Id); return; }
+
+            var menu = new MenuFlyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.BottomEdgeAlignedLeft };
+            var current = ProjectBox.Password.Trim();
+            foreach (var p in projects)
+            {
+                var item = new ToggleMenuFlyoutItem
+                {
+                    Text = string.IsNullOrEmpty(p.Name) || p.Name == p.Id ? p.Id : $"{p.Name}  ({p.Id})",
+                    IsChecked = p.Id == current,
+                };
+                var id = p.Id;
+                item.Click += (_, _) => ApplyProject(id);
+                menu.Items.Add(item);
+            }
+            ShowPage(false);
+            menu.ShowAt(ProjectBox); // opens under the field, left-aligned, inside the window
+        }
+        catch (Exception ex) { ShowBanner(InfoBarSeverity.Error, "Could not load projects", ex.Message); }
+        finally
+        {
+            _projectsLoading = false;
+            ProjectPickButton.IsEnabled = true;
+        }
+    }
+
+    void ApplyProject(string id)
+    {
+        var firstTime = string.IsNullOrWhiteSpace(_saved.ProjectId);
+        ProjectBox.Password = id;
+        MarkDirty();
+        if (firstTime) { Log($"Project selected: {id} - saving."); Save_Click(this, new RoutedEventArgs()); }
+        else Log($"Project selected: {id} - press Save & Restart to apply.");
+    }
+
+    void InstallGcloud_Click(object sender, RoutedEventArgs e) => _ = RunSetupAsync();
+
+    void CancelSignIn_Click(object sender, RoutedEventArgs e) => _authCts?.Cancel();
 
     void RevealToggle_Changed(object sender, RoutedEventArgs e)
     {
