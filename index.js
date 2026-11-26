@@ -1684,7 +1684,7 @@ async function vertexJson(method, hostname, apiPath, body, forceRefresh = false)
 function classifyModel(id) {
     const s = String(id || '').toLowerCase();
     if (s.startsWith('automl')) return 'other';
-    if (s.startsWith('imagen') || /-image(-|$)/.test(s)) return 'image';
+    if (s.startsWith('imagen') || /-image(-|$)/.test(s) || s.includes('nano-banana')) return 'image';
     if (s.startsWith('veo')) return 'video';
     if (s.includes('embedding')) return 'embedding';
     if (s.includes('tts') || s.startsWith('chirp') || s.includes('lyria') || s.includes('native-audio')) return 'audio';
@@ -1742,12 +1742,13 @@ async function listVertexModels() {
 }
 
 // OpenAI "size" (e.g. 1024x1792) -> nearest Vertex aspect ratio.
+const IMAGE_ASPECT_RATIOS = { '1:1': 1, '2:3': 2 / 3, '3:2': 1.5, '3:4': 3 / 4, '4:3': 4 / 3, '4:5': 0.8, '5:4': 1.25, '9:16': 9 / 16, '16:9': 16 / 9, '21:9': 21 / 9 };
 function sizeToAspectRatio(size, explicit) {
-    if (explicit) return explicit;
+    if (explicit && IMAGE_ASPECT_RATIOS[explicit]) return explicit;
     const m = /^(\d+)x(\d+)$/.exec(String(size || ''));
     if (!m) return '1:1';
     const r = Number(m[1]) / Number(m[2]);
-    const options = { '1:1': 1, '16:9': 16 / 9, '9:16': 9 / 16, '4:3': 4 / 3, '3:4': 3 / 4, '3:2': 1.5, '2:3': 2 / 3 };
+    const options = IMAGE_ASPECT_RATIOS;
     return Object.entries(options).sort((a, b) => Math.abs(a[1] - r) - Math.abs(b[1] - r))[0][0];
 }
 
@@ -1756,7 +1757,62 @@ function sizeToAspectRatio(size, explicit) {
 const imageSignatureCache = new LRUCache(500); // sha1(image b64) -> thoughtSignature
 function imageKey(b64) { return require('crypto').createHash('sha1').update(b64).digest('hex'); }
 
-async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputImages = [], extra = {}, contents = null, systemInstruction = null }) {
+// Optional client options for Gemini image models (Vertex AI Studio app). `vertex` =
+// { location, generationConfig: { responseModalities, maxOutputTokens, thinkingConfig, mediaResolution,
+//   imageConfig: { aspectRatio, imageSize, imageOutputOptions, personGeneration } }, tools: [{ googleSearch }] }.
+// A field Vertex rejects for a model is dropped (reported back as `dropped`) instead of failing the request.
+const OPTIONAL_IMAGE_FIELDS = [
+    ['tools'],
+    ['generationConfig', 'mediaResolution'],
+    ['generationConfig', 'thinkingConfig'],
+    ['generationConfig', 'imageConfig', 'imageOutputOptions'],
+    ['generationConfig', 'imageConfig', 'personGeneration'],
+    ['generationConfig', 'imageConfig', 'imageSize'],
+    ['generationConfig', 'maxOutputTokens'],
+];
+function hasPath(o, path) { return path.reduce((a, k) => (a == null ? a : a[k]), o) !== undefined; }
+function deletePath(o, path) {
+    const parent = path.slice(0, -1).reduce((a, k) => (a == null ? a : a[k]), o);
+    if (parent) delete parent[path[path.length - 1]];
+}
+// The optional field a 400 error complains about, or null when the error is not about options.
+function rejectedImageField(body, message) {
+    const msg = String(message || '');
+    for (const path of OPTIONAL_IMAGE_FIELDS) {
+        if (!hasPath(body, path)) continue;
+        const name = path[path.length - 1];
+        const snake = name.replace(/[A-Z]/g, c => '_' + c.toLowerCase());
+        if (msg.includes(name) || msg.includes(snake)) return path;
+    }
+    const guesses = [
+        [/search|grounding|tool/i, ['tools']],
+        [/thinking/i, ['generationConfig', 'thinkingConfig']],
+        [/media.?resolution/i, ['generationConfig', 'mediaResolution']],
+        [/image.?size|resolution/i, ['generationConfig', 'imageConfig', 'imageSize']],
+        [/mime|output.?format|output.?options/i, ['generationConfig', 'imageConfig', 'imageOutputOptions']],
+        [/person/i, ['generationConfig', 'imageConfig', 'personGeneration']],
+    ];
+    for (const [re, path] of guesses) if (re.test(msg) && hasPath(body, path)) return path;
+    return null;
+}
+
+function buildImageGenerationConfig(model, ar, vertex) {
+    const vgc = (vertex && vertex.generationConfig) || {};
+    const gc = { responseModalities: ['TEXT', 'IMAGE'] };
+    if (Array.isArray(vgc.responseModalities) && vgc.responseModalities.includes('IMAGE')) gc.responseModalities = vgc.responseModalities;
+    if (Number(vgc.maxOutputTokens) > 0) gc.maxOutputTokens = Number(vgc.maxOutputTokens);
+    if (vgc.mediaResolution) gc.mediaResolution = vgc.mediaResolution;
+    // thinkingLevel is Gemini 3+ only; older models reject it.
+    if (vgc.thinkingConfig && supportsThinkingLevel(model)) gc.thinkingConfig = vgc.thinkingConfig;
+    const vic = vgc.imageConfig || {};
+    gc.imageConfig = { aspectRatio: IMAGE_ASPECT_RATIOS[vic.aspectRatio] ? vic.aspectRatio : ar };
+    if (['1K', '2K', '4K'].includes(vic.imageSize)) gc.imageConfig.imageSize = vic.imageSize;
+    if (vic.imageOutputOptions && vic.imageOutputOptions.mimeType) gc.imageConfig.imageOutputOptions = vic.imageOutputOptions;
+    if (vic.personGeneration) gc.imageConfig.personGeneration = vic.personGeneration;
+    return gc;
+}
+
+async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputImages = [], extra = {}, contents = null, systemInstruction = null, vertex = null }) {
     const ar = sizeToAspectRatio(size, aspectRatio);
     const count = Math.max(1, Math.min(4, Number(n) || 1));
     if (isImagenModel(model)) {
@@ -1776,24 +1832,42 @@ async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputIm
     // `contents` (full multi-turn history) overrides prompt/inputImages.
     const body = {
         contents: contents || [{ role: 'user', parts: [...inputImages, { text: prompt }] }],
-        generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: ar } },
+        generationConfig: buildImageGenerationConfig(model, ar, vertex),
         safetySettings: SAFETY_SETTINGS
     };
+    // Only Google Search grounding is a real Vertex tool here; anything else is ignored.
+    const tools = ((vertex && vertex.tools) || []).filter(t => t && t.googleSearch);
+    if (tools.length) body.tools = tools.map(t => ({ googleSearch: t.googleSearch || {} }));
     if (systemInstruction) body.systemInstruction = { role: 'system', parts: [{ text: systemInstruction }] };
+    const location = (vertex && typeof vertex.location === 'string' && /^[a-z0-9-]+$/.test(vertex.location)) ? vertex.location : LOCATION;
+    const dropped = [];
+    if (vertex && vertex.celebrityGeneration) dropped.push('celebrityGeneration (no Vertex field)');
+    if (vertex && (vertex.tools || []).some(t => t && !t.googleSearch)) dropped.push('tools other than googleSearch');
     const images = [];
     let text = '';
+    let thoughts = '';
     for (let i = 0; i < count; i++) {
         // Image generation on Vertex occasionally stalls or returns 429/5xx: retry once.
         let statusCode, data;
-        for (let attempt = 0; attempt < 2; attempt++) {
+        for (let attempt = 0, failures = 0; attempt < 9; attempt++) {
             try {
-                ({ statusCode, data } = await vertexJson('POST', vertexHost(LOCATION),
-                    `/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${model}:generateContent`, body));
+                ({ statusCode, data } = await vertexJson('POST', vertexHost(location),
+                    `/v1/projects/${PROJECT_ID}/locations/${location}/publishers/google/models/${model}:generateContent`, body));
             } catch (e) {
-                if (attempt === 0) { console.log(`[IMAGES] ${e.message}, retrying once`); continue; }
+                if (failures++ === 0) { console.log(`[IMAGES] ${e.message}, retrying once`); continue; }
                 throw e;
             }
-            if ((statusCode === 429 || statusCode >= 500) && attempt === 0) {
+            if (statusCode === 400) {
+                // An optional client option this model does not accept: drop it and retry.
+                const path = rejectedImageField(body, data?.error?.message);
+                if (path) {
+                    deletePath(body, path);
+                    dropped.push(path.join('.'));
+                    console.log(`[IMAGES] Vertex rejected ${path.join('.')} for ${model}: ${String(data?.error?.message || '').slice(0, 200)}`);
+                    continue;
+                }
+            }
+            if ((statusCode === 429 || statusCode >= 500) && failures++ === 0) {
                 console.log(`[IMAGES] HTTP ${statusCode}, retrying once`);
                 await new Promise(r => setTimeout(r, 3000));
                 continue;
@@ -1802,6 +1876,9 @@ async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputIm
         }
         if (statusCode !== 200) throw Object.assign(new Error(data?.error?.message || `Gemini image HTTP ${statusCode}`), { statusCode });
         for (const p of (data.candidates?.[0]?.content?.parts || [])) {
+            // With includeThoughts the model can also return draft images from its
+            // thinking (thought: true); only the final images are results.
+            if (p.inlineData?.data && p.thought) continue;
             if (p.inlineData?.data) {
                 images.push({ b64: p.inlineData.data, mimeType: p.inlineData.mimeType || 'image/png' });
                 // Gemini 3 image models need this signature back when the image is
@@ -1809,11 +1886,13 @@ async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputIm
                 const sig = p.thoughtSignature || p.thought_signature;
                 if (sig) imageSignatureCache.set(imageKey(p.inlineData.data), sig);
             }
-            else if (p.text && !p.thought) text += p.text;
+            else if (p.text && p.thought) thoughts += p.text;
+            else if (p.text) text += p.text;
         }
     }
+    if (dropped.length) console.log(`[IMAGES] Options not applied for ${model}: ${dropped.join(', ')}`);
     if (!images.length) throw Object.assign(new Error(text || 'Model returned no image.'), { statusCode: 400 });
-    return { images, text };
+    return { images, text, thoughts, dropped };
 }
 
 function sendOpenAIError(res, e) {
@@ -1836,7 +1915,7 @@ app.post('/v1/images/generations', async (req, res) => {
             if (part) inputImages.push(part);
         }
         console.log(`[IMAGES] model=${model} n=${n || 1} size=${size || '-'} inputImages=${inputImages.length}`);
-        const { images, text } = await generateImages({ model, prompt, n, size, aspectRatio: aspect_ratio, inputImages, extra: req.body.parameters || {} });
+        const { images, text } = await generateImages({ model, prompt, n, size, aspectRatio: aspect_ratio, inputImages, extra: req.body.parameters || {}, vertex: req.body.vertex || null });
         res.json({
             created: Math.floor(Date.now() / 1000),
             data: images.map(img => response_format === 'url'
@@ -1907,18 +1986,18 @@ async function handleImageModelChat(req, res, model) {
             systemInstruction = sys.filter(Boolean).join('\n') || null;
             console.log(`[V1/CHAT image] ${contents.length} turns, ${contents.reduce((a, c) => a + c.parts.filter(p => p.inlineData).length, 0)} images in history`);
         }
-        const { images, text } = await generateImages({ model, prompt, n: req.body.n || 1, size: req.body.size, aspectRatio: req.body.aspect_ratio, inputImages, contents, systemInstruction });
+        const { images, text, thoughts, dropped } = await generateImages({ model, prompt, n: req.body.n || 1, size: req.body.size, aspectRatio: req.body.aspect_ratio, inputImages, contents, systemInstruction, vertex: req.body.vertex || null });
         const content = [text, ...images.map((img, i) => `![image ${i + 1}](data:${img.mimeType};base64,${img.b64})`)].filter(Boolean).join('\n\n');
         const id = `chatcmpl-${Date.now()}`;
         const created = Math.floor(Date.now() / 1000);
         if (stream === true) {
             res.setHeader('Content-Type', 'text/event-stream');
             res.setHeader('Cache-Control', 'no-cache');
-            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`);
+            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content, ...(thoughts ? { reasoning_content: thoughts } : {}) }, finish_reason: null }], ...(dropped.length ? { vertex_dropped: dropped } : {}) })}\n\n`);
             res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
             return res.end('data: [DONE]\n\n');
         }
-        res.json({ id, object: 'chat.completion', created, model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } });
+        res.json({ id, object: 'chat.completion', created, model, choices: [{ index: 0, message: { role: 'assistant', content, ...(thoughts ? { reasoning_content: thoughts } : {}) }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, ...(dropped.length ? { vertex_dropped: dropped } : {}) });
     } catch (e) {
         console.error('[V1/CHAT image] Error:', e.message);
         sendOpenAIError(res, e);
