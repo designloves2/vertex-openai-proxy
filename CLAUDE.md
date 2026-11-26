@@ -35,6 +35,21 @@ Server / Quit. Options: "Start with Windows" (`HKCU\...\Run`, launched with
 - Release: `build-release.ps1` builds and assembles `dist/VertexOpenAIProxy/`
   (exe + node runtime + server + prod `node_modules`) and a zip; published as
   GitHub release `windows-v1.0`. `.env` is never included.
+- **Auto-update** (`gui-rs/src/update.rs`): on launch and every 24h the app
+  queries `api.github.com/repos/designloves2/vertex-openai-proxy/releases`
+  for the newest non-prerelease `windows-v<X.Y[.Z]>` tag with a `.zip` asset
+  that is newer than the exe's **Cargo.toml version** (`CARGO_PKG_VERSION`).
+  So each release must bump `gui-rs/Cargo.toml` and be tagged
+  `windows-v<that version>` (`build-release.ps1` prints the `gh release create`
+  line). On user confirm it downloads/extracts with Windows' own `curl.exe` /
+  `tar.exe` (no HTTP/zip crates), then a hidden `apply-update.cmd` in %TEMP%
+  waits for the exe's PID to exit, `robocopy /E /XF .env .gui-rs-settings`
+  over the install folder, and relaunches. Self-update is refused when the
+  exe isn't directly next to `index.js` (dev builds under `gui-rs\target`).
+  Helper output: `update.log` in the install folder. The helper avoids
+  `timeout` (fails without a console) and uses `ping` for delays.
+- No model picker by design beyond the `.env` fallback: the connecting
+  client chooses the model per request.
 
 ## Architecture notes
 

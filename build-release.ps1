@@ -12,6 +12,11 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSCommandPath
 $out  = Join-Path $root "dist\VertexOpenAIProxy"
 
+# The exe's Cargo version is what the in-app updater compares against the
+# GitHub release tag windows-v<version>; bump gui-rs/Cargo.toml for each release.
+$version = (Select-String -Path (Join-Path $root "gui-rs\Cargo.toml") -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+Write-Host "Building version $version"
+
 Push-Location (Join-Path $root "gui-rs")
 try { cargo build --release; if ($LASTEXITCODE) { throw "cargo build failed" } } finally { Pop-Location }
 
@@ -51,5 +56,7 @@ if (-not $NoZip) {
     if (Test-Path $zip) { Remove-Item $zip -Force }
     Compress-Archive -Path $out -DestinationPath $zip
     Write-Host "Zip: $zip"
+    Write-Host "Publish (the app auto-updates from the newest windows-v* release with a .zip asset):"
+    Write-Host "  gh release create windows-v$version `"$zip`" --title `"Vertex OpenAI Proxy for Windows (portable) v$version`""
 }
 Write-Host "Release folder: $out"
