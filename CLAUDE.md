@@ -15,7 +15,47 @@ message loop); closing its window drops to a taskbar icon with a Jump List
 `.gui-command` file) instead. **Don't try to fix the tray in the PowerShell
 GUI** — the Rust app is the tray-capable one.
 
-## Rust GUI (`gui-rs/`) — real system tray, portable release
+## WinUI 3 app (`gui-win/`) — current Windows GUI (v2.0.0+)
+
+C# / WinUI 3 (Windows App SDK 1.6), unpackaged and **self-contained** (no .NET
+or Windows App SDK runtime needed on the target PC). Replaced the Rust GUI
+because its classic Win32 controls looked dated, clipped text and did not
+resize. `build-release.ps1` now ships this app; `gui-rs/` is kept only as
+reference/history.
+
+- Layout (user-decided): main screen = server status + Start/Stop/Restart,
+  **Connection** card (Project ID / Location / default model / Port, edited in
+  place, Save & Restart enabled only when changed) and the server log filling
+  the rest. A **gear button at the top-left of the title bar** opens Settings
+  (App: start with Windows, auto-start server; Updates); Settings has only a
+  ← back button. No NavigationView / side menu.
+- Project ID is a PasswordBox, hidden by default, with an eye ToggleButton
+  (Visible/Hidden) — not `Peek`, the user wants to check typos.
+- Responsive in code (`ApplyLayout`), not AdaptiveTrigger (unreliable directly
+  in a `Window`): buttons drop below the status < 760 DIP, Connection fields go
+  2x2 < 1100 DIP.
+- **Title-bar buttons need a passthrough region**
+  (`InputNonClientPointerSource.SetRegionRects`), re-applied on the button's
+  SizeChanged and on Activated — set only once at startup the button had no
+  size yet and never received clicks.
+- Editable `ComboBox.Text` set before load is ignored → `SetComboValue` adds
+  and selects the item instead.
+- Same files/conventions as the Rust GUI so installs carry over: project root =
+  nearest ancestor with `index.js`; `.gui-command` (open/restart/quit/settings),
+  `.gui-rs-settings` (`auto_start_server`, `auto_check_updates`), Run value
+  `VertexOpenAIProxyGui`. A release install repoints that Run value to itself
+  on launch (dev builds never do).
+- Auto-update: same GitHub `windows-v<version>` releases and the same
+  robocopy helper as the Rust updater (`Core/Updater.cs`); version =
+  `<Version>` in `VertexOpenAIProxy.csproj`.
+- Build: .NET 8 SDK. On this PC it is a **per-user install** in
+  `%LOCALAPPDATA%\Microsoft\dotnet` (winget's machine-wide installer stalled on
+  a hidden UAC prompt); the system `dotnet` there has only the runtime, so
+  `build-release.ps1` checks `dotnet --list-sdks` before falling back to it.
+- Screenshots for checking the UI: `PrintWindow` with flag 2 works on the WinUI
+  window even when it is partly off-screen; `CopyFromScreen` does not.
+
+## Rust GUI (`gui-rs/`) — superseded by gui-win (kept for reference)
 
 Native Win32 via `native-windows-gui` (Rust only, no C++). Closing the window
 hides it to the tray; tray left-click = open, right-click = Open / Restart
@@ -35,6 +75,21 @@ Server / Quit. Options: "Start with Windows" (`HKCU\...\Run`, launched with
 - Release: `build-release.ps1` builds and assembles `dist/VertexOpenAIProxy/`
   (exe + node runtime + server + prod `node_modules`) and a zip; published as
   GitHub release `windows-v1.0`. `.env` is never included.
+- **Auto-update** (`gui-rs/src/update.rs`): on launch and every 24h the app
+  queries `api.github.com/repos/designloves2/vertex-openai-proxy/releases`
+  for the newest non-prerelease `windows-v<X.Y[.Z]>` tag with a `.zip` asset
+  that is newer than the exe's **Cargo.toml version** (`CARGO_PKG_VERSION`).
+  So each release must bump `gui-rs/Cargo.toml` and be tagged
+  `windows-v<that version>` (`build-release.ps1` prints the `gh release create`
+  line). On user confirm it downloads/extracts with Windows' own `curl.exe` /
+  `tar.exe` (no HTTP/zip crates), then a hidden `apply-update.cmd` in %TEMP%
+  waits for the exe's PID to exit, `robocopy /E /XF .env .gui-rs-settings`
+  over the install folder, and relaunches. Self-update is refused when the
+  exe isn't directly next to `index.js` (dev builds under `gui-rs\target`).
+  Helper output: `update.log` in the install folder. The helper avoids
+  `timeout` (fails without a console) and uses `ping` for delays.
+- No model picker by design beyond the `.env` fallback: the connecting
+  client chooses the model per request.
 
 ## Architecture notes
 

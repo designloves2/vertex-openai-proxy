@@ -1,6 +1,8 @@
 #![windows_subsystem = "windows"]
 //! Vertex OpenAI Proxy control panel (Rust, native Win32, real system-tray icon).
 
+mod update;
+
 use native_windows_gui as nwg;
 use std::cell::RefCell;
 use std::fs::{self, File};
@@ -10,7 +12,8 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const ENV_KEYS: [&str; 4] = [
     "GOOGLE_CLOUD_PROJECT_ID",
@@ -123,9 +126,9 @@ fn live_models(port: &str) -> Vec<String> {
     let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
         return vec![];
     };
-    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let req = format!(
-        "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        "GET /v1/models?type=chat HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
         port
     );
     if s.write_all(req.as_bytes()).is_err() {
@@ -189,11 +192,25 @@ fn find_node(root: &PathBuf) -> Option<PathBuf> {
 struct State {
     child: Option<Child>,
     was_running: bool,
+    // Model dropdown: true once filled from the running server's live list.
+    models_live: bool,
+    models_try: Option<Instant>,
     out_off: u64,
     err_off: u64,
     masked: bool,
     quitting: bool,
+    last_check: Option<Instant>,
+    upd_busy: bool,
+    upd_available: Option<update::Release>,
+    upd_notified: Option<String>,
 }
+
+enum UpdMsg {
+    Checked(Result<Option<update::Release>, String>, bool),
+    Downloaded(Result<PathBuf, String>),
+}
+
+const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_NAME: &str = "VertexOpenAIProxyGui";
@@ -215,6 +232,7 @@ fn set_boot(on: bool) -> bool {
 struct Gui {
     paths: Paths,
     state: RefCell<State>,
+    upd_slot: Arc<Mutex<Option<UpdMsg>>>,
     window: nwg::Window,
     status: nwg::Label,
     project: nwg::TextInput,
@@ -232,11 +250,13 @@ struct Gui {
     hint: nwg::Label,
     log_label: nwg::Label,
     log: nwg::TextBox,
+    upd_btn: nwg::Button,
     timer: nwg::Timer,
     tray: nwg::TrayNotification,
     tray_menu: nwg::Menu,
     mi_open: nwg::MenuItem,
     mi_restart: nwg::MenuItem,
+    mi_update: nwg::MenuItem,
     mi_quit: nwg::MenuItem,
 }
 
@@ -337,6 +357,8 @@ impl Gui {
                 let mut st = self.state.borrow_mut();
                 st.child = Some(c);
                 st.was_running = true;
+                st.models_live = false;
+                st.models_try = None;
                 st.out_off = 0;
                 st.err_off = 0;
                 drop(st);
@@ -440,8 +462,36 @@ impl Gui {
     }
 
     fn tick(&self) {
+        let msg = self.upd_slot.lock().unwrap().take();
+        if let Some(m) = msg {
+            self.on_update_msg(m);
+        }
+        let due = self.state.borrow().last_check.map_or(false, |t| t.elapsed() >= CHECK_EVERY);
+        if due {
+            self.check_update(false);
+        }
         self.read_new(&self.paths.out_log.clone(), false);
         self.read_new(&self.paths.err_log.clone(), true);
+        // The dropdown is first filled at launch, usually before the server is up
+        // (then only FALLBACK_MODELS). Reload it from the live server once it answers.
+        let want_models = {
+            let st = self.state.borrow();
+            st.was_running && !st.models_live
+                && st.models_try.map_or(true, |t| t.elapsed() >= Duration::from_secs(3))
+        };
+        if want_models {
+            self.state.borrow_mut().models_try = Some(Instant::now());
+            let mut models = live_models(self.port.text().trim());
+            if !models.is_empty() {
+                for m in FALLBACK_MODELS {
+                    if !models.iter().any(|x| x == m) {
+                        models.push(m.to_string());
+                    }
+                }
+                self.model_pick.set_collection(models);
+                self.state.borrow_mut().models_live = true;
+            }
+        }
         let exited = {
             let mut st = self.state.borrow_mut();
             let mut ex = false;
@@ -471,6 +521,134 @@ impl Gui {
                 _ => {}
             }
         }
+    }
+
+    // ---- auto-update ----
+    fn check_update(&self, manual: bool) {
+        {
+            let mut st = self.state.borrow_mut();
+            if st.upd_busy {
+                drop(st);
+                if manual {
+                    self.log("Update: already checking/downloading.");
+                }
+                return;
+            }
+            st.upd_busy = true;
+            st.last_check = Some(Instant::now());
+        }
+        if manual {
+            self.log("Checking GitHub for updates...");
+        }
+        let slot = self.upd_slot.clone();
+        std::thread::spawn(move || {
+            let r = update::check();
+            *slot.lock().unwrap() = Some(UpdMsg::Checked(r, manual));
+        });
+    }
+
+    fn set_update_ui(&self, rel: Option<&update::Release>) {
+        let t = match rel {
+            Some(r) => format!("Install Update v{}", r.version),
+            None => "Check for Updates".to_string(),
+        };
+        self.upd_btn.set_text(&t);
+    }
+
+    fn on_update_msg(&self, msg: UpdMsg) {
+        self.state.borrow_mut().upd_busy = false;
+        match msg {
+            UpdMsg::Checked(Err(e), manual) => {
+                self.log(&format!("Update check failed: {}", e));
+                if manual {
+                    nwg::modal_error_message(&self.window, "Update", &format!("Update check failed:\n{}", e));
+                }
+            }
+            UpdMsg::Checked(Ok(None), manual) => {
+                self.state.borrow_mut().upd_available = None;
+                self.set_update_ui(None);
+                if manual {
+                    let m = format!("You are on the latest version (v{}).", update::current_version());
+                    self.log(&m);
+                    nwg::modal_info_message(&self.window, "Update", &m);
+                }
+            }
+            UpdMsg::Checked(Ok(Some(rel)), manual) => {
+                let first = {
+                    let mut st = self.state.borrow_mut();
+                    st.upd_available = Some(rel.clone());
+                    let first = st.upd_notified.as_deref() != Some(rel.version.as_str());
+                    st.upd_notified = Some(rel.version.clone());
+                    first
+                };
+                self.set_update_ui(Some(&rel));
+                if first || manual {
+                    self.log(&format!("Update available: v{} (installed v{}).", rel.version, update::current_version()));
+                }
+                if manual || (first && self.window.visible()) {
+                    self.prompt_install();
+                } else if first {
+                    let txt = format!("Version {} is available. Right-click the tray icon to install.", rel.version);
+                    self.tray.show(&txt, Some("Vertex OpenAI Proxy update"), Some(nwg::TrayNotificationFlags::INFO_ICON), None);
+                }
+            }
+            UpdMsg::Downloaded(Err(e)) => {
+                self.log(&format!("Update download failed: {}", e));
+                nwg::modal_error_message(&self.window, "Update", &format!("Download failed:\n{}", e));
+            }
+            UpdMsg::Downloaded(Ok(payload)) => {
+                let root = self.paths.root.clone();
+                match update::apply(&payload, &root) {
+                    Ok(()) => {
+                        self.log("Update downloaded; restarting to install...");
+                        self.quit();
+                    }
+                    Err(e) => {
+                        self.log(&format!("Update failed: {}", e));
+                        nwg::modal_error_message(&self.window, "Update", &format!("Update failed:\n{}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Asks the user, then downloads in the background; installing happens in
+    /// on_update_msg once the download finishes.
+    fn prompt_install(&self) {
+        let Some(rel) = self.state.borrow().upd_available.clone() else {
+            self.check_update(true);
+            return;
+        };
+        if self.state.borrow().upd_busy {
+            return;
+        }
+        if let Err(e) = update::install_dir(&self.paths.root) {
+            self.log(&format!("Update v{} available, but cannot self-update: {}", rel.version, e));
+            return;
+        }
+        self.show_window();
+        let q = format!(
+            "Version {} is available (installed: {}).\n\nDownload and install it now? The server will stop, the app will restart, and your .env settings are kept.",
+            rel.version,
+            update::current_version()
+        );
+        let p = nwg::MessageParams {
+            title: "Update available",
+            content: &q,
+            buttons: nwg::MessageButtons::YesNo,
+            icons: nwg::MessageIcons::Question,
+        };
+        if nwg::modal_message(&self.window, &p) != nwg::MessageChoice::Yes {
+            self.log("Update postponed.");
+            return;
+        }
+        self.state.borrow_mut().upd_busy = true;
+        self.log(&format!("Downloading v{} ...", rel.version));
+        let slot = self.upd_slot.clone();
+        std::thread::spawn(move || {
+            let r = update::download(&rel);
+            *slot.lock().unwrap() = Some(UpdMsg::Downloaded(r));
+        });
     }
 
     fn layout(&self) {
@@ -505,6 +683,8 @@ fn handle(gui: &Rc<Gui>, evt: nwg::Event, data: nwg::EventData, h: nwg::ControlH
                 gui.restart();
             } else if h == gui.save_btn.handle {
                 gui.save_restart();
+            } else if h == gui.upd_btn.handle {
+                gui.prompt_install();
             } else if h == gui.chk_boot.handle {
                 let on = gui.chk_boot.check_state() == nwg::CheckBoxState::Checked;
                 if set_boot(on) {
@@ -551,6 +731,8 @@ fn handle(gui: &Rc<Gui>, evt: nwg::Event, data: nwg::EventData, h: nwg::ControlH
                 gui.show_window();
             } else if h == gui.mi_restart.handle {
                 gui.restart();
+            } else if h == gui.mi_update.handle {
+                gui.prompt_install();
             } else if h == gui.mi_quit.handle {
                 gui.quit();
             }
@@ -584,7 +766,8 @@ fn main() {
 
     let mut g = Gui {
         paths,
-        state: RefCell::new(State { child: None, was_running: false, out_off: 0, err_off: 0, masked: true, quitting: false }),
+        state: RefCell::new(State { child: None, was_running: false, models_live: false, models_try: None,out_off: 0, err_off: 0, masked: true, quitting: false, last_check: None, upd_busy: false, upd_available: None, upd_notified: None }),
+        upd_slot: Arc::new(Mutex::new(None)),
         window: Default::default(),
         status: Default::default(),
         project: Default::default(),
@@ -602,11 +785,13 @@ fn main() {
         hint: Default::default(),
         log_label: Default::default(),
         log: Default::default(),
+        upd_btn: Default::default(),
         timer: Default::default(),
         tray: Default::default(),
         tray_menu: Default::default(),
         mi_open: Default::default(),
         mi_restart: Default::default(),
+        mi_update: Default::default(),
         mi_quit: Default::default(),
     };
 
@@ -616,7 +801,7 @@ fn main() {
     nwg::Window::builder()
         .size((720, 640))
         .position((300, 120))
-        .title("Vertex OpenAI Proxy")
+        .title(&format!("Vertex OpenAI Proxy v{}", update::current_version()))
         .icon(Some(&icon))
         .build(&mut g.window)
         .unwrap();
@@ -661,12 +846,15 @@ fn main() {
         .flags(nwg::TextBoxFlags::VISIBLE | nwg::TextBoxFlags::VSCROLL | nwg::TextBoxFlags::TAB_STOP)
         .build(&mut g.log).unwrap();
 
+    nwg::Button::builder().parent(w).text("Check for Updates").position((500, 324)).size((180, 26)).build(&mut g.upd_btn).unwrap();
+
     nwg::Timer::builder().parent(w).interval(400).stopped(false).build(&mut g.timer).unwrap();
 
     nwg::TrayNotification::builder().parent(w).icon(Some(&icon)).tip(Some("Vertex OpenAI Proxy - Stopped")).build(&mut g.tray).unwrap();
     nwg::Menu::builder().parent(w).popup(true).build(&mut g.tray_menu).unwrap();
     nwg::MenuItem::builder().parent(&g.tray_menu).text("Open").build(&mut g.mi_open).unwrap();
     nwg::MenuItem::builder().parent(&g.tray_menu).text("Restart Server").build(&mut g.mi_restart).unwrap();
+    nwg::MenuItem::builder().parent(&g.tray_menu).text("Check for / Install Updates").build(&mut g.mi_update).unwrap();
     nwg::MenuItem::builder().parent(&g.tray_menu).text("Quit").build(&mut g.mi_quit).unwrap();
     g.load_form();
     g.layout();
@@ -679,5 +867,7 @@ fn main() {
     if gui.auto_server() {
         gui.start();
     }
+    gui.check_update(false); // on launch; tick() repeats it every 24h
+
     nwg::dispatch_thread_events();
 }

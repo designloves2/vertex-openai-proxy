@@ -761,6 +761,12 @@ app.post('/v1/chat/completions', async (req, res) => {
         const MODEL_ID_TO_USE = resolveVertexModel(requestedModel);
         const LOCATION_TO_USE = LOCATION;
 
+        // Image models (Imagen / Gemini *-image) are routed to image generation.
+        if (isImageModel(MODEL_ID_TO_USE) && Array.isArray(messages) && messages.length) {
+            console.log(`[V1/CHAT] Image model ${MODEL_ID_TO_USE}: routing to image generation`);
+            return await handleImageModelChat(req, res, MODEL_ID_TO_USE);
+        }
+
         // FIX: Respect client streaming request
         const stream = req.body.stream === true;
 
@@ -820,7 +826,9 @@ app.post('/v1/chat/completions', async (req, res) => {
             generationConfig.topK = 40;
         }
 
-        if (!inlinedImagesInPayload && isGemini3Flash) {
+        if (!supportsThinkingLevel(MODEL_ID_TO_USE)) {
+            // thinkingLevel is Gemini 3+ only; older models (2.5 etc.) reject it with 400.
+        } else if (!inlinedImagesInPayload && isGemini3Flash) {
             generationConfig.thinkingConfig = { thinkingLevel: "high" };
         } else if (!inlinedImagesInPayload) {
             generationConfig.thinkingConfig = { thinkingLevel: "high" };
@@ -1440,7 +1448,7 @@ app.post('/v1/responses', async (req, res) => {
                         generationConfig: {
                             temperature: temperature || 0.7,
                             maxOutputTokens: max_output_tokens || 32768,
-                            thinkingConfig: (inlinedImagesInPayload ? undefined : { thinkingLevel: "high" })
+                            thinkingConfig: ((inlinedImagesInPayload || !supportsThinkingLevel(MODEL_ID_TO_USE)) ? undefined : { thinkingLevel: "high" })
                         },
                         safetySettings: SAFETY_SETTINGS
                     };
@@ -1562,7 +1570,7 @@ app.post('/v1/responses', async (req, res) => {
                 generationConfig: {
                     temperature: temperature || 0.7,
                     maxOutputTokens: max_output_tokens || 32768,
-                    thinkingConfig: (inlinedImagesInPayload ? undefined : { thinkingLevel: "high" })
+                    thinkingConfig: ((inlinedImagesInPayload || !supportsThinkingLevel(MODEL_ID_TO_USE)) ? undefined : { thinkingLevel: "high" })
                 },
                 safetySettings: SAFETY_SETTINGS
             };
@@ -1630,39 +1638,321 @@ app.post('/v1/responses', async (req, res) => {
 });
 
 // ============================================================================
-// OPENAI-COMPATIBLE ENDPOINT: /v1/models
+// VERTEX MODEL CATALOG + IMAGE GENERATION
 // ============================================================================
 
-app.get('/v1/models', (req, res) => {
-    const list = [
-        { id: MODEL_ID, vision: true, reasoning: /gemini-3/i.test(MODEL_ID) },
-        { id: "gpt-4o", vision: true, reasoning: true },
-        { id: "gpt-4o-mini", vision: true, reasoning: false },
-        { id: "Gemini 3.1 Pro (Vision)", vision: true, reasoning: true },
-        { id: "gemini-3.8-flash", vision: true, reasoning: true },
-        { id: "gemini-1.5-pro-002", vision: true, reasoning: true },
-        { id: "gemini-1.5-flash-002", vision: true, reasoning: false }
-    ].filter((m, i, arr) => arr.findIndex(x => x.id === m.id) === i);
+function vertexHost(location) {
+    return (!location || location === 'global') ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
+}
 
-    res.json({
-        object: "list",
-        data: list.map(m => ({
-            id: m.id,
-            object: "model",
-            created: 1715385600,
-            owned_by: "system",
-            permission: [],
-            root: m.id,
-            parent: null,
-            input_modalities: ["text", "image"],
-            capabilities: {
-                vision: m.vision,
-                reasoning: m.reasoning,
-                tool_use: true,
-                json_mode: true
-            }
-        }))
+// Generic authenticated JSON request to Vertex AI, with one 401 refresh retry.
+async function vertexJson(method, hostname, apiPath, body, forceRefresh = false) {
+    const accessToken = await getAccessToken(forceRefresh);
+    const postData = body ? JSON.stringify(body) : null;
+    const result = await new Promise((resolve, reject) => {
+        const headers = {
+            'Authorization': `Bearer ${accessToken}`,
+            'x-goog-user-project': PROJECT_ID
+        };
+        if (postData) {
+            headers['Content-Type'] = 'application/json';
+            headers['Content-Length'] = Buffer.byteLength(postData);
+        }
+        const r = https.request({ hostname, port: 443, path: apiPath, method, headers, timeout: 120000 }, (resp) => {
+            const chunks = [];
+            resp.on('data', c => chunks.push(c));
+            resp.on('end', () => {
+                const text = Buffer.concat(chunks).toString('utf8');
+                let data = null;
+                try { data = JSON.parse(text); } catch (_) { data = { raw: text.substring(0, 500) }; }
+                resolve({ statusCode: resp.statusCode, data });
+            });
+        });
+        r.on('timeout', () => r.destroy(new Error('Vertex request timed out')));
+        r.on('error', reject);
+        if (postData) r.write(postData);
+        r.end();
     });
+    if (result.statusCode === 401 && !forceRefresh) {
+        cachedAccessToken = null;
+        return vertexJson(method, hostname, apiPath, body, true);
+    }
+    return result;
+}
+
+// Classify a Vertex model id into a capability bucket.
+function classifyModel(id) {
+    const s = String(id || '').toLowerCase();
+    if (s.startsWith('automl')) return 'other';
+    if (s.startsWith('imagen') || /-image(-|$)/.test(s)) return 'image';
+    if (s.startsWith('veo')) return 'video';
+    if (s.includes('embedding')) return 'embedding';
+    if (s.includes('tts') || s.startsWith('chirp') || s.includes('lyria') || s.includes('native-audio')) return 'audio';
+    if (s.startsWith('gemini') || s.startsWith('gemma') || s.startsWith('gpt-')) return 'chat';
+    return 'other';
+}
+
+function supportsThinkingLevel(id) { return /gemini-3/i.test(String(id || '')); }
+function isImagenModel(id) { return /^imagen/i.test(id); }
+function isImageModel(id) { return classifyModel(id) === 'image'; }
+
+const FALLBACK_MODELS = [
+    'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+    'gemini-3-pro-image-preview', 'gemini-2.5-flash-image',
+    'imagen-4.0-generate-001', 'imagen-4.0-fast-generate-001', 'imagen-4.0-ultra-generate-001', 'imagen-3.0-generate-002',
+    'text-embedding-005', 'gemini-embedding-001'
+];
+
+let modelCatalogCache = { at: 0, ids: null };
+const MODEL_CATALOG_TTL = 60 * 60 * 1000;
+
+// Lists every Google publisher model Vertex AI exposes (Model Garden API).
+async function listVertexModels() {
+    if (modelCatalogCache.ids && Date.now() - modelCatalogCache.at < MODEL_CATALOG_TTL) {
+        return modelCatalogCache.ids;
+    }
+    const ids = new Set();
+    let pageToken = '';
+    try {
+        for (let page = 0; page < 20; page++) {
+            const qs = `pageSize=200${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+            const { statusCode, data } = await vertexJson('GET', 'us-central1-aiplatform.googleapis.com', `/v1beta1/publishers/google/models?${qs}`);
+            if (statusCode !== 200) throw new Error(`HTTP ${statusCode}: ${JSON.stringify(data).substring(0, 300)}`);
+            for (const m of (data.publisherModels || [])) {
+                const id = String(m.name || '').split('/').pop();
+                // Only models callable directly over the API (serverless). Models with
+                // an openSourceCategory (gemma2, bert, alphafold3, ...) must first be
+                // deployed to an endpoint, so they are not usable through this proxy.
+                // Partner/open models served as MaaS end in "-maas".
+                if (!id) continue;
+                if (m.openSourceCategory && !/-maas$/i.test(id)) continue;
+                ids.add(id);
+            }
+            pageToken = data.nextPageToken;
+            if (!pageToken) break;
+        }
+    } catch (e) {
+        console.log(`[MODELS] Live model list failed, using fallback list: ${e.message}`);
+    }
+    // The fallback list is used only when the live catalog is unavailable; merging
+    // it in would list models the project cannot actually call.
+    const list = ids.size ? [...ids].sort() : FALLBACK_MODELS.slice();
+    if (ids.size) modelCatalogCache = { at: Date.now(), ids: list };
+    return list;
+}
+
+// OpenAI "size" (e.g. 1024x1792) -> nearest Vertex aspect ratio.
+function sizeToAspectRatio(size, explicit) {
+    if (explicit) return explicit;
+    const m = /^(\d+)x(\d+)$/.exec(String(size || ''));
+    if (!m) return '1:1';
+    const r = Number(m[1]) / Number(m[2]);
+    const options = { '1:1': 1, '16:9': 16 / 9, '9:16': 9 / 16, '4:3': 4 / 3, '3:4': 3 / 4, '3:2': 1.5, '2:3': 2 / 3 };
+    return Object.entries(options).sort((a, b) => Math.abs(a[1] - r) - Math.abs(b[1] - r))[0][0];
+}
+
+// Generates images with either an Imagen model (:predict) or a Gemini image
+// model (:generateContent with IMAGE output). Returns { images: [{ b64, mimeType }], text }.
+const imageSignatureCache = new LRUCache(500); // sha1(image b64) -> thoughtSignature
+function imageKey(b64) { return require('crypto').createHash('sha1').update(b64).digest('hex'); }
+
+async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputImages = [], extra = {}, contents = null, systemInstruction = null }) {
+    const ar = sizeToAspectRatio(size, aspectRatio);
+    const count = Math.max(1, Math.min(4, Number(n) || 1));
+    if (isImagenModel(model)) {
+        const loc = LOCATION === 'global' ? 'us-central1' : LOCATION;
+        const parameters = { sampleCount: count, aspectRatio: ar, ...extra };
+        const { statusCode, data } = await vertexJson('POST', vertexHost(loc),
+            `/v1/projects/${PROJECT_ID}/locations/${loc}/publishers/google/models/${model}:predict`,
+            { instances: [{ prompt }], parameters });
+        if (statusCode !== 200) throw Object.assign(new Error(data?.error?.message || `Imagen HTTP ${statusCode}`), { statusCode });
+        const images = (data.predictions || []).filter(p => p.bytesBase64Encoded)
+            .map(p => ({ b64: p.bytesBase64Encoded, mimeType: p.mimeType || 'image/png' }));
+        if (!images.length) throw Object.assign(new Error('Imagen returned no images (likely blocked by safety filters).'), { statusCode: 400 });
+        return { images, text: '' };
+    }
+
+    // Gemini native image model (also supports editing via input images).
+    // `contents` (full multi-turn history) overrides prompt/inputImages.
+    const body = {
+        contents: contents || [{ role: 'user', parts: [...inputImages, { text: prompt }] }],
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: ar } },
+        safetySettings: SAFETY_SETTINGS
+    };
+    if (systemInstruction) body.systemInstruction = { role: 'system', parts: [{ text: systemInstruction }] };
+    const images = [];
+    let text = '';
+    for (let i = 0; i < count; i++) {
+        // Image generation on Vertex occasionally stalls or returns 429/5xx: retry once.
+        let statusCode, data;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                ({ statusCode, data } = await vertexJson('POST', vertexHost(LOCATION),
+                    `/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${model}:generateContent`, body));
+            } catch (e) {
+                if (attempt === 0) { console.log(`[IMAGES] ${e.message}, retrying once`); continue; }
+                throw e;
+            }
+            if ((statusCode === 429 || statusCode >= 500) && attempt === 0) {
+                console.log(`[IMAGES] HTTP ${statusCode}, retrying once`);
+                await new Promise(r => setTimeout(r, 3000));
+                continue;
+            }
+            break;
+        }
+        if (statusCode !== 200) throw Object.assign(new Error(data?.error?.message || `Gemini image HTTP ${statusCode}`), { statusCode });
+        for (const p of (data.candidates?.[0]?.content?.parts || [])) {
+            if (p.inlineData?.data) {
+                images.push({ b64: p.inlineData.data, mimeType: p.inlineData.mimeType || 'image/png' });
+                // Gemini 3 image models need this signature back when the image is
+                // replayed in a later turn; the client only keeps the image itself.
+                const sig = p.thoughtSignature || p.thought_signature;
+                if (sig) imageSignatureCache.set(imageKey(p.inlineData.data), sig);
+            }
+            else if (p.text && !p.thought) text += p.text;
+        }
+    }
+    if (!images.length) throw Object.assign(new Error(text || 'Model returned no image.'), { statusCode: 400 });
+    return { images, text };
+}
+
+function sendOpenAIError(res, e) {
+    const code = e.statusCode && e.statusCode >= 400 && e.statusCode < 600 ? e.statusCode : 500;
+    res.status(code).json({ error: { message: e.message, type: code < 500 ? 'invalid_request_error' : 'api_error', param: null, code: null } });
+}
+
+// OpenAI-compatible image generation: POST /v1/images/generations
+// Optional input images for editing (Gemini image models): body.image / body.images
+// as data: URIs, http(s) URLs or raw base64.
+app.post('/v1/images/generations', async (req, res) => {
+    try {
+        const { prompt, n, size, response_format, aspect_ratio } = req.body || {};
+        const model = resolveVertexModel(req.body?.model || process.env.IMAGE_MODEL_ID || 'imagen-4.0-generate-001');
+        if (!prompt) return res.status(400).json({ error: { message: 'prompt is required', type: 'invalid_request_error' } });
+        const rawImages = [].concat(req.body.images || [], req.body.image || []);
+        const inputImages = [];
+        for (const u of rawImages) {
+            const part = await resolveOpenAIImageUrl(typeof u === 'string' ? u : (u?.url || u?.image_url));
+            if (part) inputImages.push(part);
+        }
+        console.log(`[IMAGES] model=${model} n=${n || 1} size=${size || '-'} inputImages=${inputImages.length}`);
+        const { images, text } = await generateImages({ model, prompt, n, size, aspectRatio: aspect_ratio, inputImages, extra: req.body.parameters || {} });
+        res.json({
+            created: Math.floor(Date.now() / 1000),
+            data: images.map(img => response_format === 'url'
+                ? { url: `data:${img.mimeType};base64,${img.b64}`, revised_prompt: text || undefined }
+                : { b64_json: img.b64, revised_prompt: text || undefined })
+        });
+    } catch (e) {
+        console.error('[IMAGES] Error:', e.message);
+        sendOpenAIError(res, e);
+    }
+});
+
+// Image model used through /v1/chat/completions: the last user message is the
+// prompt, attached images are edit inputs, and the result comes back as markdown
+// image(s) with data: URIs (renders in Open WebUI etc.).
+async function handleImageModelChat(req, res, model) {
+    try {
+        const { messages, stream } = req.body;
+        const lastUser = [...messages].reverse().find(m => m.role === 'user') || {};
+        let prompt = '';
+        const inputImages = [];
+        if (typeof lastUser.content === 'string') prompt = lastUser.content;
+        else for (const c of (lastUser.content || [])) {
+            if (c.type === 'text') prompt += (prompt ? '\n' : '') + c.text;
+            else if (c.type === 'image_url' && !isImagenModel(model)) {
+                const part = await resolveOpenAIImageUrl(c.image_url?.url || c.image_url);
+                if (part) inputImages.push(part);
+            }
+        }
+        // Gemini image models get the whole conversation, so "make it bluer" edits
+        // the previous result. Imagen is single-shot: last user prompt only.
+        let contents = null;
+        let systemInstruction = null;
+        if (!isImagenModel(model)) {
+            contents = [];
+            const sys = [];
+            for (const m of messages) {
+                const parts = [];
+                const items = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : (m.content || []);
+                if (m.role === 'system' || m.role === 'developer') {
+                    sys.push(items.filter(c => c.type === 'text').map(c => c.text).join('\n'));
+                    continue;
+                }
+                for (const c of items) {
+                    if (c.type === 'image_url') {
+                        const part = await resolveOpenAIImageUrl(c.image_url?.url || c.image_url);
+                        if (part) parts.push(part);
+                    } else if (c.type === 'text' && c.text) {
+                        // Previous assistant replies carry images as markdown data: URIs.
+                        const re = /!\[[^\]]*\]\((data:([^;]+);base64,([A-Za-z0-9+/=]+))\)/g;
+                        let last = 0, mm;
+                        while ((mm = re.exec(c.text))) {
+                            const before = c.text.slice(last, mm.index).trim();
+                            if (before) parts.push({ text: before });
+                            const imgPart = { inlineData: { mimeType: normalizeGeminiImageMime(mm[2]), data: mm[3] } };
+                            if (m.role === 'assistant') {
+                                imgPart.thoughtSignature = imageSignatureCache.get(imageKey(mm[3])) || SKIP_THOUGHT_SIGNATURE_VALIDATOR;
+                            }
+                            parts.push(imgPart);
+                            last = re.lastIndex;
+                        }
+                        const rest = c.text.slice(last).trim();
+                        if (rest) parts.push({ text: rest });
+                    }
+                }
+                if (parts.length) contents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
+            }
+            systemInstruction = sys.filter(Boolean).join('\n') || null;
+            console.log(`[V1/CHAT image] ${contents.length} turns, ${contents.reduce((a, c) => a + c.parts.filter(p => p.inlineData).length, 0)} images in history`);
+        }
+        const { images, text } = await generateImages({ model, prompt, n: req.body.n || 1, size: req.body.size, aspectRatio: req.body.aspect_ratio, inputImages, contents, systemInstruction });
+        const content = [text, ...images.map((img, i) => `![image ${i + 1}](data:${img.mimeType};base64,${img.b64})`)].filter(Boolean).join('\n\n');
+        const id = `chatcmpl-${Date.now()}`;
+        const created = Math.floor(Date.now() / 1000);
+        if (stream === true) {
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`);
+            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+            return res.end('data: [DONE]\n\n');
+        }
+        res.json({ id, object: 'chat.completion', created, model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } });
+    } catch (e) {
+        console.error('[V1/CHAT image] Error:', e.message);
+        sendOpenAIError(res, e);
+    }
+}
+
+// ============================================================================
+// OPENAI-COMPATIBLE ENDPOINT: /v1/models  (live Vertex catalog, all modalities)
+// ?type=chat|image|video|embedding|audio filters; ?refresh=1 bypasses the cache.
+// ============================================================================
+
+app.get('/v1/models', async (req, res) => {
+    if (req.query.refresh) modelCatalogCache = { at: 0, ids: null };
+    const ids = await listVertexModels();
+    const all = [MODEL_ID, ...ids, 'gpt-4o', 'gpt-4o-mini'].filter((m, i, arr) => m && arr.indexOf(m) === i);
+    const wanted = req.query.type ? String(req.query.type).split(',') : null;
+    const data = all.map(id => {
+        const type = classifyModel(resolveVertexModel(id));
+        return {
+            id, object: 'model', created: 1715385600, owned_by: 'google', permission: [], root: id, parent: null,
+            type,
+            input_modalities: (type === 'chat' || type === 'image') ? ['text', 'image'] : ['text'],
+            output_modalities: type === 'image' ? ['image', 'text'] : type === 'video' ? ['video'] : type === 'audio' ? ['audio'] : ['text'],
+            capabilities: {
+                vision: type === 'chat' || (type === 'image' && !isImagenModel(id)),
+                reasoning: type === 'chat' && /gemini-(2\.5|3)/i.test(id),
+                tool_use: type === 'chat',
+                json_mode: type === 'chat',
+                image_generation: type === 'image'
+            }
+        };
+    // "other" (OCR, detectors, ...) can't be called via chat/images; list them only when asked.
+    }).filter(m => wanted ? wanted.includes(m.type) : m.type !== 'other');
+    res.json({ object: 'list', data });
 });
 
 // ============================================================================
@@ -1710,6 +2000,8 @@ app.get('/', (req, res) => {
 // ============================================================================
 
 app.listen(PORT, () => {
+    // Warm the model catalog so the first /v1/models call (e.g. the GUI dropdown) is instant.
+    listVertexModels().then(l => console.log(`[MODELS] ${l.length} models available`)).catch(() => {});
     console.log('='.repeat(60));
     console.log('  Vertex AI Gemini Backend Server');
     console.log('='.repeat(60));

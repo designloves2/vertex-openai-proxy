@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Builds the Rust tray GUI and assembles a self-contained, portable folder
+    Builds the WinUI 3 tray app (gui-win) and assembles a self-contained, portable folder
     (dist\VertexOpenAIProxy) plus a zip. Copy/unzip that folder anywhere and
     double-click VertexOpenAIProxy.exe - no install, no Node.js needed.
 #>
@@ -12,13 +12,31 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSCommandPath
 $out  = Join-Path $root "dist\VertexOpenAIProxy"
 
-Push-Location (Join-Path $root "gui-rs")
-try { cargo build --release; if ($LASTEXITCODE) { throw "cargo build failed" } } finally { Pop-Location }
+# The app's <Version> is what the in-app updater compares against the GitHub
+# release tag windows-v<version>; bump gui-win/VertexOpenAIProxy.csproj for each release.
+$csproj = Join-Path $root "gui-win\VertexOpenAIProxy.csproj"
+$version = ([xml](Get-Content $csproj -Raw)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+Write-Host "Building version $version"
+
+# .NET 8 SDK: a system install with an SDK, else the per-user one from dotnet-install.ps1.
+# A system dotnet with only the runtime (no SDK) can sit first on PATH, so check for an SDK.
+$hasSdk = (Get-Command dotnet -ErrorAction SilentlyContinue) -and (dotnet --list-sdks 2>$null)
+if (-not $hasSdk -and (Test-Path "$env:LOCALAPPDATA\Microsoft\dotnet\dotnet.exe")) {
+    $env:DOTNET_ROOT = "$env:LOCALAPPDATA\Microsoft\dotnet"
+    $env:Path = "$env:DOTNET_ROOT;$env:Path"
+}
+$appOut = Join-Path $root "dist\_app"
+if (Test-Path $appOut) { Remove-Item $appOut -Recurse -Force }
+dotnet publish $csproj -c Release -o $appOut
+if ($LASTEXITCODE) { throw "dotnet publish failed" }
 
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 New-Item -ItemType Directory -Path $out | Out-Null
 
-Copy-Item (Join-Path $root "gui-rs\target\release\vertex-proxy-gui.exe") (Join-Path $out "VertexOpenAIProxy.exe")
+# Self-contained WinUI app (exe + .NET + Windows App SDK runtime) at the folder root,
+# next to index.js - the layout the in-app updater expects.
+Copy-Item (Join-Path $appOut "*") $out -Recurse
+Remove-Item $appOut -Recurse -Force
 foreach ($f in "index.js", "auth.js", "package.json", "package-lock.json", ".env.example", "LICENSE") {
     $p = Join-Path $root $f
     if (Test-Path $p) { Copy-Item $p $out }
@@ -51,5 +69,7 @@ if (-not $NoZip) {
     if (Test-Path $zip) { Remove-Item $zip -Force }
     Compress-Archive -Path $out -DestinationPath $zip
     Write-Host "Zip: $zip"
+    Write-Host "Publish (the app auto-updates from the newest windows-v* release with a .zip asset):"
+    Write-Host "  gh release create windows-v$version `"$zip`" --title `"Vertex OpenAI Proxy for Windows (portable) v$version`""
 }
 Write-Host "Release folder: $out"
