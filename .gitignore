@@ -62,3 +62,6 @@ gui-win/bin/
 gui-win/obj/
 .gui-command
 .gui-rs-settings
+
+# macOS Xcode project: keep asset catalog JSON
+!macos/**/*.json

@@ -4,6 +4,14 @@ All notable changes and architectural overhauls to the **Vertex AI to OpenAI Pro
 
 ---
 
+## [2026-11-26] macOS 앱 v1.1 (`macos-v1.1`)
+
+- Swift 소스를 저장소의 `macos/` 폴더로 편입 (Xcode 프로젝트).
+- Windows/Node 프록시의 이미지·모델 기능을 Swift로 이식: 실시간 Vertex 모델 카탈로그(`/v1/models`, `?type=`, `?refresh=1`), `POST /v1/images/generations`, 이미지 모델 채팅(멀티턴 편집, thoughtSignature 캐시), 클라이언트 `vertex` 옵션(거부된 옵션은 드롭 후 재시도, `vertex_dropped` 보고), Nano Banana/4:5·5:4·21:9, 이미지 429 백오프(5/15/30초).
+- `thinkingLevel`을 Gemini 3 모델에만 전송, 401 토큰 자동 갱신 및 429 재시도, 에러 응답 JSON 이스케이프 수정.
+
+---
+
 ## [2026-11-26] 이미지 모델 지원 + Vertex 전체 모델 목록
 
 - `/v1/models`: Vertex Model Garden API에서 사용 가능한 전체 Google 모델을 실시간 조회 (1시간 캐시, `?refresh=1`, `?type=chat|image|video|embedding|audio` 필터). 각 모델에 `type`/modalities/`image_generation` 표시.
