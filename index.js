@@ -1867,9 +1867,14 @@ async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputIm
                     continue;
                 }
             }
-            if ((statusCode === 429 || statusCode >= 500) && failures++ === 0) {
-                console.log(`[IMAGES] HTTP ${statusCode}, retrying once`);
-                await new Promise(r => setTimeout(r, 3000));
+            // 429 "Resource exhausted" on global preview image models is usually a
+            // short shared-capacity spike (the same request succeeds moments later),
+            // so back off a few times; 5xx gets one quick retry.
+            const backoff = statusCode === 429 ? [5000, 15000, 30000] : statusCode >= 500 ? [3000] : [];
+            if (failures < backoff.length) {
+                const wait = backoff[failures++];
+                console.log(`[IMAGES] HTTP ${statusCode}: ${String(data?.error?.message || '').slice(0, 160)} - retry ${failures}/${backoff.length} in ${wait / 1000}s`);
+                await new Promise(r => setTimeout(r, wait));
                 continue;
             }
             break;
