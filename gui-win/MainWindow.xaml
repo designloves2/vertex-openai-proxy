@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="VertexProxy.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:tb="using:H.NotifyIcon"
+    Title="Vertex OpenAI Proxy">
+
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- System tray icon (left click: open, right click: menu) -->
+        <tb:TaskbarIcon x:Name="TrayIcon" ToolTipText="Vertex OpenAI Proxy" ContextMenuMode="SecondWindow" Visibility="Visible">
+            <tb:TaskbarIcon.ContextFlyout>
+                <MenuFlyout>
+                    <MenuFlyoutItem Text="Open" Click="TrayOpen_Click">
+                        <MenuFlyoutItem.Icon><SymbolIcon Symbol="OpenWith" /></MenuFlyoutItem.Icon>
+                    </MenuFlyoutItem>
+                    <MenuFlyoutItem x:Name="TrayStartStop" Text="Start server" Click="TrayStartStop_Click">
+                        <MenuFlyoutItem.Icon><SymbolIcon Symbol="Play" /></MenuFlyoutItem.Icon>
+                    </MenuFlyoutItem>
+                    <MenuFlyoutItem Text="Restart server" Click="Restart_Click">
+                        <MenuFlyoutItem.Icon><SymbolIcon Symbol="Refresh" /></MenuFlyoutItem.Icon>
+                    </MenuFlyoutItem>
+                    <MenuFlyoutSeparator />
+                    <MenuFlyoutItem Text="Quit" Click="TrayQuit_Click">
+                        <MenuFlyoutItem.Icon><SymbolIcon Symbol="Cancel" /></MenuFlyoutItem.Icon>
+                    </MenuFlyoutItem>
+                </MenuFlyout>
+            </tb:TaskbarIcon.ContextFlyout>
+        </tb:TaskbarIcon>
+
+        <!-- Custom title bar -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="6,0,140,0">
+            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                <Button x:Name="GearButton" Click="Gear_Click" Width="40" Height="36" Padding="0" Background="Transparent" BorderThickness="0"
+                        ToolTipService.ToolTip="Settings" AutomationProperties.Name="Settings">
+                    <FontIcon Glyph="&#xE713;" FontSize="16" />
+                </Button>
+                <Image Source="ms-appx:///Assets/app.ico" Width="18" Height="18" />
+                <TextBlock Text="Vertex OpenAI Proxy" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
+                <TextBlock x:Name="VersionText" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+            </StackPanel>
+        </Grid>
+
+        <Grid Grid.Row="1">
+                <!-- ================= Dashboard ================= -->
+                <Grid x:Name="HomePage" Padding="24,12,24,24">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" MinHeight="140" />
+                    </Grid.RowDefinitions>
+
+                    <!-- Status + server controls -->
+                    <Border Grid.Row="0" Style="{StaticResource CardStyle}" Margin="0,0,0,16">
+                        <Grid x:Name="StatusGrid" ColumnSpacing="16" RowSpacing="0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                                <Ellipse x:Name="StatusDot" Width="12" Height="12" VerticalAlignment="Center" />
+                                <StackPanel>
+                                    <TextBlock x:Name="StatusText" Text="Stopped" Style="{StaticResource SubtitleTextBlockStyle}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="4">
+                                        <TextBlock x:Name="EndpointText" Style="{StaticResource BodyTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" IsTextSelectionEnabled="True" />
+                                        <Button Click="CopyEndpoint_Click" Padding="6,4" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="Copy base URL">
+                                            <FontIcon Glyph="&#xE8C8;" FontSize="14" />
+                                        </Button>
+                                    </StackPanel>
+                                </StackPanel>
+                            </StackPanel>
+                            <StackPanel x:Name="ServerButtons" Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Button x:Name="StartButton" Style="{StaticResource AccentButtonStyle}" Click="Start_Click" MinWidth="104">
+                                    <StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Play" /><TextBlock Text="Start" /></StackPanel>
+                                </Button>
+                                <Button x:Name="StopButton" Click="Stop_Click" MinWidth="104">
+                                    <StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Stop" /><TextBlock Text="Stop" /></StackPanel>
+                                </Button>
+                                <Button x:Name="RestartButton" Click="Restart_Click" MinWidth="104">
+                                    <StackPanel Orientation="Horizontal" Spacing="8"><SymbolIcon Symbol="Refresh" /><TextBlock Text="Restart" /></StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <InfoBar x:Name="Banner" Grid.Row="1" IsOpen="False" IsClosable="True" Visibility="Collapsed" Margin="0,0,0,16" />
+
+                    <!-- Connection: compact, edited in place on the dashboard -->
+                    <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,0,0,16">
+                        <StackPanel>
+                            <Grid>
+                                <TextBlock Text="Connection" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" />
+                                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                                    <Button x:Name="RevertButton" Content="Revert" Click="Revert_Click" IsEnabled="False" />
+                                    <Button x:Name="SaveButton" Content="Save &amp; Restart" Style="{StaticResource AccentButtonStyle}" Click="Save_Click" IsEnabled="False" />
+                                </StackPanel>
+                            </Grid>
+                            <Grid x:Name="ConnGrid" Margin="0,12,0,0" ColumnSpacing="12" RowSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition x:Name="ConnC0" Width="*" />
+                                    <ColumnDefinition x:Name="ConnC1" Width="*" />
+                                    <ColumnDefinition x:Name="ConnC2" Width="1.4*" />
+                                    <ColumnDefinition x:Name="ConnC3" Width="120" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid x:Name="ProjectField" ColumnSpacing="4">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <!-- Hidden by default; the eye toggles it so typos can be checked -->
+                                    <PasswordBox x:Name="ProjectBox" Header="Project ID" PasswordRevealMode="Hidden" PlaceholderText="Google Cloud project ID" PasswordChanged="Field_Changed" />
+                                    <ToggleButton x:Name="RevealToggle" Grid.Column="1" VerticalAlignment="Bottom" Width="36" Height="33" Padding="0"
+                                                  Checked="RevealToggle_Changed" Unchecked="RevealToggle_Changed" ToolTipService.ToolTip="Show / hide project ID" AutomationProperties.Name="Show project ID">
+                                        <FontIcon x:Name="RevealIcon" Glyph="&#xE7B3;" FontSize="15" />
+                                    </ToggleButton>
+                                </Grid>
+                                <ComboBox x:Name="LocationBox" Grid.Column="1" Header="Location" IsEditable="True" HorizontalAlignment="Stretch" TextSubmitted="Combo_TextSubmitted" SelectionChanged="Combo_SelectionChanged">
+                                    <x:String>global</x:String>
+                                    <x:String>us-central1</x:String>
+                                    <x:String>us-east5</x:String>
+                                    <x:String>europe-west1</x:String>
+                                    <x:String>asia-northeast1</x:String>
+                                    <x:String>asia-northeast3</x:String>
+                                </ComboBox>
+                                <ComboBox x:Name="ModelBox" Grid.Column="2" Header="Default model (fallback)" IsEditable="True" HorizontalAlignment="Stretch" TextSubmitted="Combo_TextSubmitted" SelectionChanged="Combo_SelectionChanged"
+                                          ToolTipService.ToolTip="Used only when a client request has no model. Clients pick the model per request." />
+                                <NumberBox x:Name="PortBox" Grid.Column="3" Header="Port" Minimum="1" Maximum="65535" SpinButtonPlacementMode="Hidden" ValueChanged="PortBox_ValueChanged" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Log fills whatever height is left -->
+                    <Border Grid.Row="3" Style="{StaticResource CardStyle}" Padding="20,12,20,16">
+                        <Grid RowSpacing="8">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <TextBlock Text="Server log" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" />
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="4">
+                                    <Button Click="OpenFolder_Click" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="Open install folder">
+                                        <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE838;" FontSize="14" /><TextBlock Text="Folder" /></StackPanel>
+                                    </Button>
+                                    <Button Click="ClearLog_Click" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="Clear log">
+                                        <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE74D;" FontSize="14" /><TextBlock Text="Clear" /></StackPanel>
+                                    </Button>
+                                </StackPanel>
+                            </Grid>
+                            <TextBox x:Name="LogBox" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                                     FontFamily="Cascadia Mono, Consolas" FontSize="12"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto" VerticalAlignment="Stretch" />
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <!-- ================= Settings ================= -->
+                <ScrollViewer x:Name="SettingsPage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+                    <StackPanel Padding="24,8,24,24" Spacing="16" MaxWidth="900" HorizontalAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,0,0,4">
+                            <Button Click="Back_Click" Width="40" Height="36" Padding="0" Background="Transparent" BorderThickness="0"
+                                    ToolTipService.ToolTip="Back" AutomationProperties.Name="Back" VerticalAlignment="Center">
+                                <FontIcon Glyph="&#xE72B;" FontSize="16" />
+                            </Button>
+                            <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" VerticalAlignment="Center" />
+                        </StackPanel>
+
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="App" Style="{StaticResource CardTitle}" />
+                                <ToggleSwitch x:Name="BootToggle" Header="Start with Windows" OnContent="On (starts hidden in the tray)" OffContent="Off" Toggled="BootToggle_Toggled" />
+                                <ToggleSwitch x:Name="AutoServerToggle" Header="Start the server when the app opens" OnContent="On" OffContent="Off" Toggled="AutoServerToggle_Toggled" />
+                                <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap" Margin="0,4,0,0"
+                                           Text="Closing the window keeps the proxy running in the system tray." />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Updates" Style="{StaticResource CardTitle}" />
+                                <ToggleSwitch x:Name="UpdateToggle" Header="Check for updates automatically" OnContent="On (daily)" OffContent="Off" Toggled="UpdateToggle_Toggled" />
+                                <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
+                                    <Button x:Name="CheckUpdateButton" Content="Check for updates" Click="CheckUpdate_Click" />
+                                    <ProgressRing x:Name="UpdateRing" IsActive="False" Width="20" Height="20" />
+                                    <TextBlock x:Name="UpdateStatusText" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+        </Grid>
+    </Grid>
+</Window>

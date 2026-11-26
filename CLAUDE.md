@@ -15,7 +15,47 @@ message loop); closing its window drops to a taskbar icon with a Jump List
 `.gui-command` file) instead. **Don't try to fix the tray in the PowerShell
 GUI** — the Rust app is the tray-capable one.
 
-## Rust GUI (`gui-rs/`) — real system tray, portable release
+## WinUI 3 app (`gui-win/`) — current Windows GUI (v2.0.0+)
+
+C# / WinUI 3 (Windows App SDK 1.6), unpackaged and **self-contained** (no .NET
+or Windows App SDK runtime needed on the target PC). Replaced the Rust GUI
+because its classic Win32 controls looked dated, clipped text and did not
+resize. `build-release.ps1` now ships this app; `gui-rs/` is kept only as
+reference/history.
+
+- Layout (user-decided): main screen = server status + Start/Stop/Restart,
+  **Connection** card (Project ID / Location / default model / Port, edited in
+  place, Save & Restart enabled only when changed) and the server log filling
+  the rest. A **gear button at the top-left of the title bar** opens Settings
+  (App: start with Windows, auto-start server; Updates); Settings has only a
+  ← back button. No NavigationView / side menu.
+- Project ID is a PasswordBox, hidden by default, with an eye ToggleButton
+  (Visible/Hidden) — not `Peek`, the user wants to check typos.
+- Responsive in code (`ApplyLayout`), not AdaptiveTrigger (unreliable directly
+  in a `Window`): buttons drop below the status < 760 DIP, Connection fields go
+  2x2 < 1100 DIP.
+- **Title-bar buttons need a passthrough region**
+  (`InputNonClientPointerSource.SetRegionRects`), re-applied on the button's
+  SizeChanged and on Activated — set only once at startup the button had no
+  size yet and never received clicks.
+- Editable `ComboBox.Text` set before load is ignored → `SetComboValue` adds
+  and selects the item instead.
+- Same files/conventions as the Rust GUI so installs carry over: project root =
+  nearest ancestor with `index.js`; `.gui-command` (open/restart/quit/settings),
+  `.gui-rs-settings` (`auto_start_server`, `auto_check_updates`), Run value
+  `VertexOpenAIProxyGui`. A release install repoints that Run value to itself
+  on launch (dev builds never do).
+- Auto-update: same GitHub `windows-v<version>` releases and the same
+  robocopy helper as the Rust updater (`Core/Updater.cs`); version =
+  `<Version>` in `VertexOpenAIProxy.csproj`.
+- Build: .NET 8 SDK. On this PC it is a **per-user install** in
+  `%LOCALAPPDATA%\Microsoft\dotnet` (winget's machine-wide installer stalled on
+  a hidden UAC prompt); the system `dotnet` there has only the runtime, so
+  `build-release.ps1` checks `dotnet --list-sdks` before falling back to it.
+- Screenshots for checking the UI: `PrintWindow` with flag 2 works on the WinUI
+  window even when it is partly off-screen; `CopyFromScreen` does not.
+
+## Rust GUI (`gui-rs/`) — superseded by gui-win (kept for reference)
 
 Native Win32 via `native-windows-gui` (Rust only, no C++). Closing the window
 hides it to the tray; tray left-click = open, right-click = Open / Restart
