@@ -56,3 +56,9 @@ gui-rs/target/
 dist/
 .gui-rs-settings
 .gui-command
+
+# WinUI 3 app build output and runtime files
+gui-win/bin/
+gui-win/obj/
+.gui-command
+.gui-rs-settings

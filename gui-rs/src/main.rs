@@ -126,9 +126,9 @@ fn live_models(port: &str) -> Vec<String> {
     let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
         return vec![];
     };
-    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let req = format!(
-        "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        "GET /v1/models?type=chat HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
         port
     );
     if s.write_all(req.as_bytes()).is_err() {
@@ -192,6 +192,9 @@ fn find_node(root: &PathBuf) -> Option<PathBuf> {
 struct State {
     child: Option<Child>,
     was_running: bool,
+    // Model dropdown: true once filled from the running server's live list.
+    models_live: bool,
+    models_try: Option<Instant>,
     out_off: u64,
     err_off: u64,
     masked: bool,
@@ -354,6 +357,8 @@ impl Gui {
                 let mut st = self.state.borrow_mut();
                 st.child = Some(c);
                 st.was_running = true;
+                st.models_live = false;
+                st.models_try = None;
                 st.out_off = 0;
                 st.err_off = 0;
                 drop(st);
@@ -467,6 +472,26 @@ impl Gui {
         }
         self.read_new(&self.paths.out_log.clone(), false);
         self.read_new(&self.paths.err_log.clone(), true);
+        // The dropdown is first filled at launch, usually before the server is up
+        // (then only FALLBACK_MODELS). Reload it from the live server once it answers.
+        let want_models = {
+            let st = self.state.borrow();
+            st.was_running && !st.models_live
+                && st.models_try.map_or(true, |t| t.elapsed() >= Duration::from_secs(3))
+        };
+        if want_models {
+            self.state.borrow_mut().models_try = Some(Instant::now());
+            let mut models = live_models(self.port.text().trim());
+            if !models.is_empty() {
+                for m in FALLBACK_MODELS {
+                    if !models.iter().any(|x| x == m) {
+                        models.push(m.to_string());
+                    }
+                }
+                self.model_pick.set_collection(models);
+                self.state.borrow_mut().models_live = true;
+            }
+        }
         let exited = {
             let mut st = self.state.borrow_mut();
             let mut ex = false;
@@ -741,7 +766,7 @@ fn main() {
 
     let mut g = Gui {
         paths,
-        state: RefCell::new(State { child: None, was_running: false, out_off: 0, err_off: 0, masked: true, quitting: false, last_check: None, upd_busy: false, upd_available: None, upd_notified: None }),
+        state: RefCell::new(State { child: None, was_running: false, models_live: false, models_try: None,out_off: 0, err_off: 0, masked: true, quitting: false, last_check: None, upd_busy: false, upd_available: None, upd_notified: None }),
         upd_slot: Arc::new(Mutex::new(None)),
         window: Default::default(),
         status: Default::default(),

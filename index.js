@@ -1720,7 +1720,13 @@ async function listVertexModels() {
             if (statusCode !== 200) throw new Error(`HTTP ${statusCode}: ${JSON.stringify(data).substring(0, 300)}`);
             for (const m of (data.publisherModels || [])) {
                 const id = String(m.name || '').split('/').pop();
-                if (id) ids.add(id);
+                // Only models callable directly over the API (serverless). Models with
+                // an openSourceCategory (gemma2, bert, alphafold3, ...) must first be
+                // deployed to an endpoint, so they are not usable through this proxy.
+                // Partner/open models served as MaaS end in "-maas".
+                if (!id) continue;
+                if (m.openSourceCategory && !/-maas$/i.test(id)) continue;
+                ids.add(id);
             }
             pageToken = data.nextPageToken;
             if (!pageToken) break;
@@ -1728,7 +1734,9 @@ async function listVertexModels() {
     } catch (e) {
         console.log(`[MODELS] Live model list failed, using fallback list: ${e.message}`);
     }
-    const list = ids.size ? [...new Set([...ids, ...FALLBACK_MODELS])].sort() : FALLBACK_MODELS.slice();
+    // The fallback list is used only when the live catalog is unavailable; merging
+    // it in would list models the project cannot actually call.
+    const list = ids.size ? [...ids].sort() : FALLBACK_MODELS.slice();
     if (ids.size) modelCatalogCache = { at: Date.now(), ids: list };
     return list;
 }
@@ -1942,7 +1950,8 @@ app.get('/v1/models', async (req, res) => {
                 image_generation: type === 'image'
             }
         };
-    }).filter(m => !wanted || wanted.includes(m.type));
+    // "other" (OCR, detectors, ...) can't be called via chat/images; list them only when asked.
+    }).filter(m => wanted ? wanted.includes(m.type) : m.type !== 'other');
     res.json({ object: 'list', data });
 });
 
@@ -1991,6 +2000,8 @@ app.get('/', (req, res) => {
 // ============================================================================
 
 app.listen(PORT, () => {
+    // Warm the model catalog so the first /v1/models call (e.g. the GUI dropdown) is instant.
+    listVertexModels().then(l => console.log(`[MODELS] ${l.length} models available`)).catch(() => {});
     console.log('='.repeat(60));
     console.log('  Vertex AI Gemini Backend Server');
     console.log('='.repeat(60));
