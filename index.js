@@ -1658,7 +1658,7 @@ async function vertexJson(method, hostname, apiPath, body, forceRefresh = false)
             headers['Content-Type'] = 'application/json';
             headers['Content-Length'] = Buffer.byteLength(postData);
         }
-        const r = https.request({ hostname, port: 443, path: apiPath, method, headers, timeout: 180000 }, (resp) => {
+        const r = https.request({ hostname, port: 443, path: apiPath, method, headers, timeout: 120000 }, (resp) => {
             const chunks = [];
             resp.on('data', c => chunks.push(c));
             resp.on('end', () => {
@@ -1745,7 +1745,10 @@ function sizeToAspectRatio(size, explicit) {
 
 // Generates images with either an Imagen model (:predict) or a Gemini image
 // model (:generateContent with IMAGE output). Returns { images: [{ b64, mimeType }], text }.
-async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputImages = [], extra = {} }) {
+const imageSignatureCache = new LRUCache(500); // sha1(image b64) -> thoughtSignature
+function imageKey(b64) { return require('crypto').createHash('sha1').update(b64).digest('hex'); }
+
+async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputImages = [], extra = {}, contents = null, systemInstruction = null }) {
     const ar = sizeToAspectRatio(size, aspectRatio);
     const count = Math.max(1, Math.min(4, Number(n) || 1));
     if (isImagenModel(model)) {
@@ -1761,20 +1764,43 @@ async function generateImages({ model, prompt, n = 1, size, aspectRatio, inputIm
         return { images, text: '' };
     }
 
-    // Gemini native image model (also supports editing via input images)
+    // Gemini native image model (also supports editing via input images).
+    // `contents` (full multi-turn history) overrides prompt/inputImages.
     const body = {
-        contents: [{ role: 'user', parts: [...inputImages, { text: prompt }] }],
+        contents: contents || [{ role: 'user', parts: [...inputImages, { text: prompt }] }],
         generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: ar } },
         safetySettings: SAFETY_SETTINGS
     };
+    if (systemInstruction) body.systemInstruction = { role: 'system', parts: [{ text: systemInstruction }] };
     const images = [];
     let text = '';
     for (let i = 0; i < count; i++) {
-        const { statusCode, data } = await vertexJson('POST', vertexHost(LOCATION),
-            `/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${model}:generateContent`, body);
+        // Image generation on Vertex occasionally stalls or returns 429/5xx: retry once.
+        let statusCode, data;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                ({ statusCode, data } = await vertexJson('POST', vertexHost(LOCATION),
+                    `/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${model}:generateContent`, body));
+            } catch (e) {
+                if (attempt === 0) { console.log(`[IMAGES] ${e.message}, retrying once`); continue; }
+                throw e;
+            }
+            if ((statusCode === 429 || statusCode >= 500) && attempt === 0) {
+                console.log(`[IMAGES] HTTP ${statusCode}, retrying once`);
+                await new Promise(r => setTimeout(r, 3000));
+                continue;
+            }
+            break;
+        }
         if (statusCode !== 200) throw Object.assign(new Error(data?.error?.message || `Gemini image HTTP ${statusCode}`), { statusCode });
         for (const p of (data.candidates?.[0]?.content?.parts || [])) {
-            if (p.inlineData?.data) images.push({ b64: p.inlineData.data, mimeType: p.inlineData.mimeType || 'image/png' });
+            if (p.inlineData?.data) {
+                images.push({ b64: p.inlineData.data, mimeType: p.inlineData.mimeType || 'image/png' });
+                // Gemini 3 image models need this signature back when the image is
+                // replayed in a later turn; the client only keeps the image itself.
+                const sig = p.thoughtSignature || p.thought_signature;
+                if (sig) imageSignatureCache.set(imageKey(p.inlineData.data), sig);
+            }
             else if (p.text && !p.thought) text += p.text;
         }
     }
@@ -1832,7 +1858,48 @@ async function handleImageModelChat(req, res, model) {
                 if (part) inputImages.push(part);
             }
         }
-        const { images, text } = await generateImages({ model, prompt, n: req.body.n || 1, size: req.body.size, aspectRatio: req.body.aspect_ratio, inputImages });
+        // Gemini image models get the whole conversation, so "make it bluer" edits
+        // the previous result. Imagen is single-shot: last user prompt only.
+        let contents = null;
+        let systemInstruction = null;
+        if (!isImagenModel(model)) {
+            contents = [];
+            const sys = [];
+            for (const m of messages) {
+                const parts = [];
+                const items = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : (m.content || []);
+                if (m.role === 'system' || m.role === 'developer') {
+                    sys.push(items.filter(c => c.type === 'text').map(c => c.text).join('\n'));
+                    continue;
+                }
+                for (const c of items) {
+                    if (c.type === 'image_url') {
+                        const part = await resolveOpenAIImageUrl(c.image_url?.url || c.image_url);
+                        if (part) parts.push(part);
+                    } else if (c.type === 'text' && c.text) {
+                        // Previous assistant replies carry images as markdown data: URIs.
+                        const re = /!\[[^\]]*\]\((data:([^;]+);base64,([A-Za-z0-9+/=]+))\)/g;
+                        let last = 0, mm;
+                        while ((mm = re.exec(c.text))) {
+                            const before = c.text.slice(last, mm.index).trim();
+                            if (before) parts.push({ text: before });
+                            const imgPart = { inlineData: { mimeType: normalizeGeminiImageMime(mm[2]), data: mm[3] } };
+                            if (m.role === 'assistant') {
+                                imgPart.thoughtSignature = imageSignatureCache.get(imageKey(mm[3])) || SKIP_THOUGHT_SIGNATURE_VALIDATOR;
+                            }
+                            parts.push(imgPart);
+                            last = re.lastIndex;
+                        }
+                        const rest = c.text.slice(last).trim();
+                        if (rest) parts.push({ text: rest });
+                    }
+                }
+                if (parts.length) contents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
+            }
+            systemInstruction = sys.filter(Boolean).join('\n') || null;
+            console.log(`[V1/CHAT image] ${contents.length} turns, ${contents.reduce((a, c) => a + c.parts.filter(p => p.inlineData).length, 0)} images in history`);
+        }
+        const { images, text } = await generateImages({ model, prompt, n: req.body.n || 1, size: req.body.size, aspectRatio: req.body.aspect_ratio, inputImages, contents, systemInstruction });
         const content = [text, ...images.map((img, i) => `![image ${i + 1}](data:${img.mimeType};base64,${img.b64})`)].filter(Boolean).join('\n\n');
         const id = `chatcmpl-${Date.now()}`;
         const created = Math.floor(Date.now() / 1000);

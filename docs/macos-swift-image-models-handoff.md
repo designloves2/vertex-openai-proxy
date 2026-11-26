@@ -64,3 +64,19 @@ the same unconditional `thinkingLevel`.
 - `gemini-2.5-flash` and `gemini-3.1-pro-preview` text chat ✔ (after fix #4)
 - Imagen: code path not verified — the test project returns 404 "not found or
   no access" for all `imagen-*` models (model access not enabled there).
+
+## 5. Multi-turn image editing (conversation memory) — added later the same day
+
+For Gemini image models in `/v1/chat/completions`, send the **whole**
+conversation instead of only the last user message:
+- system/developer messages → `systemInstruction`.
+- user/assistant text is scanned for markdown data-URI images
+  (`![..](data:<mime>;base64,<b64>)`); text before/after becomes text parts,
+  each image becomes an `inlineData` part. Assistant → role `model`.
+- Assistant image parts get `thoughtSignature` from an LRU cache (500 entries,
+  key = sha1 of the base64) filled from the response parts' `thoughtSignature`
+  when the image was generated; fall back to `skip_thought_signature_validator`.
+- Image generation retries once on timeout/429/5xx; per-request timeout 120 s.
+Verified: 2-turn edit ("blue circle" → "make it red") with `gemini-2.5-flash-image`.
+
+Client-app guidance (for the image app / chat app sessions): `docs/client-app-dev-guide.md`.
