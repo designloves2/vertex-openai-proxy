@@ -4,6 +4,12 @@ All notable changes and architectural overhauls to the **Vertex AI to OpenAI Pro
 
 ---
 
+## [2026-11-26] macOS 앱 v1.2 (`macos-v1.2`)
+
+- 앱 UI의 "Gemini Model" 선택 목록이 낡은 하드코딩 목록 대신 실시간 Vertex 모델 카탈로그(사용 가능한 모든 모델, PC와 동일)로 채워지도록 수정. 서버 시작 시 자동 갱신되며 현재 선택 모델은 항상 목록에 유지.
+
+---
+
 ## [2026-11-26] macOS 앱 v1.1 (`macos-v1.1`)
 
 - Swift 소스를 저장소의 `macos/` 폴더로 편입 (Xcode 프로젝트).

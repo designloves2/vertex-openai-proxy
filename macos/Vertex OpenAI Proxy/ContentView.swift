@@ -295,7 +295,8 @@ final class LocalProxyServer: ObservableObject {
     
     private var listener: NWListener?
     
-    let availableModels = [
+    // Seed list shown until the live Vertex catalog loads (see listVertexModels).
+    @Published var availableModels = [
         "gemini-4-argon",
         "gemini-3.7-flash",
         "gemini-3.1-pro-preview",
@@ -717,6 +718,9 @@ final class LocalProxyServer: ObservableObject {
         let list = ids.sorted()
         modelCatalogIds = list
         modelCatalogAt = Date()
+        var shown = list.filter { classifyModel($0) != "other" }
+        if !modelId.isEmpty && !shown.contains(modelId) { shown.insert(modelId, at: 0) }
+        availableModels = shown
         appendLog("[MODELS] Loaded \(list.count) models from Vertex AI catalog")
         return list
     }
