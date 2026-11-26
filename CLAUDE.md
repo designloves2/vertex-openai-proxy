@@ -155,6 +155,59 @@ Server / Quit. Options: "Start with Windows" (`HKCU\...\Run`, launched with
 Full blow-by-blow of every bug found and fixed is in `git log` for this file
 and `install-windows.ps1` if you need the detailed history.
 
+# Node proxy (`index.js`) — image models, model catalog, client image options
+
+## Status: done, verified with live Vertex calls (commits `994ce2c` .. `f4b20cb` on main)
+
+Full field-by-field spec for porting: `docs/macos-swift-image-models-handoff.md`
+(sections 1–7). Client-facing usage: `docs/client-app-dev-guide.md`.
+
+- **Model is chosen by the client per request** (`resolveVertexModel`); `.env`
+  `GOOGLE_CLOUD_MODEL_ID` / `IMAGE_MODEL_ID` are only fallbacks. The user
+  decided against a model picker in the proxy app beyond that fallback.
+- `/v1/models`: live Vertex publisher catalog (`v1beta1/publishers/google/models`
+  on `us-central1`), 1 h cache, prefetched at start, `?type=` filter,
+  `?refresh=1`. Only API-callable models: entries with `openSourceCategory`
+  are skipped (need deployment) unless `-maas`; fallback list only when the
+  live call fails; type `other` hidden by default.
+- Image generation: `POST /v1/images/generations` (Imagen `:predict`, Gemini
+  image `:generateContent` with IMAGE modality) and image models picked in
+  `/v1/chat/completions` (answer = markdown `data:` images). Gemini image chat
+  sends the whole history (previous images parsed back from markdown) so edits
+  build on the last result; Gemini 3 needs the image's `thoughtSignature`
+  back, kept in an LRU keyed by sha1 of the base64 (clients must store image
+  bytes unchanged).
+- Client `vertex` options object (from the Vertex AI Studio image app) merged
+  into the Gemini image request; options Vertex rejects with 400 are dropped
+  and retried, reported as `vertex_dropped`; thoughts → `reasoning_content`;
+  draft images with `thought: true` are skipped. `nano-banana` ids are image
+  models. Explicit aspect ratios 4:5 / 5:4 / 21:9 are kept.
+- `thinkingLevel` only for `gemini-3*` (Gemini 2.5 returns 400).
+- Image retries: 429 → 5/15/30 s back-off; 5xx → one 3 s retry. Image calls
+  are slow (2K/4K on 3.1 models > 2 min); per-call timeout 120 s.
+- Test project access: works — `gemini-2.5-flash-image`,
+  `gemini-3.1-flash-image`, `gemini-nano-banana-2.1`; 404 — all `imagen-*`,
+  `gemini-3-pro-image-preview`.
+
+## Working with the image app session
+
+The proxy is owned by this repo's session. **The user decided** that the
+Vertex AI Studio image app (`C:\Users\peopl\Vertex-AI-Studio`, separate
+session) must not edit this repo; it asks for proxy changes by message. The
+app only needs the server address (`http://127.0.0.1:3000`) and `/health`.
+
+## Testing pitfalls found this round
+
+- Killing whatever listens on port 3000 to rebuild the GUI also kills the
+  proxy another session is testing against — test on another port
+  (`PORT=3999 node index.js`) and restart 3000 via `.gui-command` = `restart`.
+- Testing the gcloud installer with fake `APPDATA`/`LOCALAPPDATA` does **not**
+  isolate it: it reinstalled the real per-user gcloud (credentials survived).
+- PowerShell 5.1 `Get-Content -Raw` + rewrite corrupted CLAUDE.md's UTF-8 (em
+  dashes); edit docs with Node or the Edit tool. In bash, backticks inside a
+  double-quoted `node -e "..."` string run as commands — use a file or single
+  quotes.
+
 # Node proxy (`index.js`) — 500 error with large `tools` arrays
 
 ## Status: fixed, user-confirmed via a 96-tool request test
